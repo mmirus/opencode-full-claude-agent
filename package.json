@@ -1,0 +1,39 @@
+{
+  "name": "opencode-full-claude-agent",
+  "version": "0.1.0",
+  "description": "An OpenCode provider for native Claude tools, plugins, skills, and hooks with per-account configuration.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "test:live": "bun run scripts/live-smoke.ts",
+    "test:host": "bun run scripts/host-smoke.ts",
+    "test:shared": "bun run scripts/shared-server-smoke.ts",
+    "test:permission": "bun run scripts/permission-smoke.ts",
+    "test:delegation": "bun run scripts/delegation-smoke.ts",
+    "test:delegation:cancel": "bun run scripts/delegation-cancel-smoke.ts",
+    "test:diff": "bun run scripts/diff-smoke.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/provider": "3.0.8",
+    "@anthropic-ai/claude-agent-sdk": "0.3.317",
+    "@opencode/plugin": "2.2.5",
+    "@opencode/schema": "2.2.5",
+    "diff": "8.0.4",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@opencode/client": "2.2.5",
+    "@types/bun": "latest",
+    "effect": "4.0.6",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.6"
+  }
+}

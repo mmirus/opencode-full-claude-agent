@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "\"${FULL_CLAUDE_FIXTURE_RUNTIME:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.cjs\"" }] }],
+    "PreToolUse": [{ "matcher": "Write|Edit", "hooks": [{ "type": "command", "command": "\"${FULL_CLAUDE_FIXTURE_RUNTIME:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.cjs\"" }] }],
+    "PostToolUse": [{ "matcher": "Read", "hooks": [{ "type": "command", "command": "\"${FULL_CLAUDE_FIXTURE_RUNTIME:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.cjs\"" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "\"${FULL_CLAUDE_FIXTURE_RUNTIME:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.cjs\"" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "\"${FULL_CLAUDE_FIXTURE_RUNTIME:-node}\" \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.cjs\"" }] }]
+  }
+}

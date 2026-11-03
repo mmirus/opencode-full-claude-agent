@@ -1,0 +1,11 @@
+node_modules/
+.opencode/
+coverage/
+*.tgz
+.claude/
+.env
+.env.*
+!.env.example
+/opencode.json
+/opencode.jsonc
+/full-claude-*/
