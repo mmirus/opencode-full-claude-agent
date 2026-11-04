@@ -6,6 +6,7 @@ import { makeEnvironment, type Profile } from "./config.js"
 import { assertHistory, digest, historyBoundary, newContent, userFingerprints, type HistoryEntry } from "./prompt.js"
 import { createStreamConverter } from "./stream.js"
 import { createDelegationMcp, DELEGATION_INSTRUCTIONS, DELEGATION_SERVER, type ActiveDelegation } from "./delegation-mcp.js"
+import { addUsage, backgroundParts, backgroundResponse, emptyUsage, type BackgroundOwner, type BackgroundResponse } from "./background.js"
 
 export interface Storage {
   get(key: string): Promise<unknown>
@@ -38,6 +39,7 @@ interface RecordState {
   boundary: string[]
   outcome: "ready" | "pending" | "settled" | "uncertain"
   pendingUUID?: string
+  delivery?: BackgroundResponse[]
   checkpoint?: {
     uuid: string
     providerID: string
@@ -59,6 +61,7 @@ interface Turn {
   operations: AbortController
 }
 interface Entry {
+  providerID: string
   record: RecordState
   native?: NativeQuery
   input?: ReadableStreamDefaultController<SDKUserMessage>
@@ -68,9 +71,12 @@ interface Entry {
   launch?: string
   stopping?: Promise<void>
   permissions?: AbortController
-  background: SDKMessage[]
   notices: SDKMessage[]
   notifying?: Promise<void>
+  noticeRetry?: ReturnType<typeof setTimeout>
+  noticeFailures?: number
+  autonomousReady?: boolean
+  cycle?: { autonomous: boolean; uuids?: string[]; frames: Array<{ message: SDKMessage; beforeAbort: boolean }> }
 }
 
 const timeout = async <T>(promise: Promise<T>, ms: number, message: string): Promise<T> => {
@@ -90,7 +96,7 @@ export class Runtime {
   constructor(
     private storage: Storage,
     private factory: QueryFactory = query,
-    private backgroundNotice: (sessionID: string, messages: SDKMessage[]) => Promise<void> = async () => {},
+    private backgroundNotice: (sessionID: string, messages: SDKMessage[], owner: BackgroundOwner) => Promise<void> = async () => {},
   ) {}
 
   private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
@@ -126,7 +132,7 @@ export class Runtime {
         if (saved?.version === 1 && saved.outcome === "settled") {
           throw new Error("This legacy Claude session has no recorded host checkpoint boundary. Start a new session; its completed actions will not be replayed.")
         }
-        entry = { record: saved ? { ...saved, version: 2 } : { version: 2, binding, nativeID: randomUUID(), users: [], boundary: [], outcome: "ready" }, background: [], notices: [] }
+        entry = { providerID: request.profile.id, record: saved ? { ...saved, version: 2 } : { version: 2, binding, nativeID: randomUUID(), users: [], boundary: [], outcome: "ready" }, notices: [] }
         this.entries.set(request.sessionID, entry)
       }
       if (entry.record.binding !== binding) {
@@ -135,7 +141,44 @@ export class Runtime {
       if (entry.record.outcome === "uncertain") throw new Error("The previous Claude turn has an uncertain outcome. Start a new session.")
       if (entry.record.outcome === "settled") await this.reconcile(request.sessionID, entry, request.history)
       assertHistory(request.history, entry.record.boundary)
+      const users = userFingerprints(request.prompt)
+      if (entry.record.users.some((hash, index) => users[index] !== hash)) throw new Error("Full Claude Agent cannot resume edited or compacted history. Start a new session.")
+      const boundary = new Set(entry.record.boundary)
+      const delivery = new Map((entry.record.delivery ?? []).map((response) => [response.id, response]))
+      for (const message of request.history) {
+        const response = backgroundResponse(message)
+        if (!response || boundary.has(digest(message))) continue
+        if (response.binding !== binding || response.nativeID !== entry.record.nativeID || response.providerID !== request.profile.id) {
+          throw new Error("Native background response belongs to another Claude session or configuration.")
+        }
+        delivery.set(response.id, response)
+      }
+      const responses = [...delivery.values()]
+      const usage = responses.reduce((total, response) => addUsage(total, response.usage), emptyUsage())
+      if (this.disposed) throw new Error("Full Claude Agent was unloaded")
+      if (responses.length) {
+        const settled: RecordState = { ...entry.record, delivery: responses, outcome: "settled", checkpoint: this.prepared(request) }
+        await this.storage.set(this.key(request.sessionID), settled)
+        entry.record = settled
+        if (this.disposed) throw new Error("Full Claude Agent was unloaded")
+        request.signal.throwIfAborted()
+        for (const response of responses) for (const part of backgroundParts(response)) {
+          request.signal.throwIfAborted()
+          if (this.disposed) throw new Error("Full Claude Agent was unloaded")
+          request.emit(part)
+        }
+      }
+      if (users.length === entry.record.users.length && (responses.length || request.history.some((message) => backgroundResponse(message)))) {
+        request.signal.throwIfAborted()
+        if (this.disposed) throw new Error("Full Claude Agent was unloaded")
+        request.emit({ type: "finish", usage, finishReason: { unified: "stop", raw: "background_delivery" } })
+        return
+      }
       const content = newContent(request.prompt, entry.record.users)
+      if (responses.length) {
+        const emit = request.emit
+        request = { ...request, emit: (part) => emit(part.type === "finish" ? { ...part, usage: addUsage(usage, part.usage) } : part) }
+      }
       const launch = digest([request.model, request.effort])
       if (entry.native && entry.launch !== launch) throw new Error("Changing model or effort on a live Full Claude Agent session requires a new session.")
       if (this.disposed) throw new Error("Full Claude Agent was unloaded")
@@ -151,14 +194,8 @@ export class Runtime {
         if (turn.unloaded) throw turn.unloaded
         request.signal.throwIfAborted()
         if (entry.failure || !entry.native) throw entry.failure ?? new Error("Claude stopped during initialization")
-        const last = request.history.at(-1)
-        const model = last?.model as { providerID?: string } | undefined
-        const placeholder = last?.type === "assistant" && model?.providerID === request.profile.id &&
-          historyBoundary([last]).length === 0 && Array.isArray(last.content) && last.content.length === 0 ? last : undefined
         entry.record = { ...entry.record, users: userFingerprints(request.prompt), pendingUUID: turn.uuid, outcome: "pending",
-          checkpoint: { uuid: turn.uuid, providerID: request.profile.id,
-            preparedHostPrefix: (placeholder ? request.history.slice(0, -1) : request.history).map(digest),
-            assistantID: placeholder?.id } }
+          checkpoint: { ...this.prepared(request), uuid: turn.uuid } }
         await this.save(request.sessionID, entry)
         if (turn.unloaded) throw turn.unloaded
         request.signal.throwIfAborted()
@@ -254,34 +291,61 @@ export class Runtime {
   }
 
   private async read(sessionID: string, entry: Entry, native: NativeQuery, cleanup: () => void) {
+    const emit = (turn: Turn, message: SDKMessage, beforeAbort = false) => {
+      if (!turn.aborted || (turn.unloaded && beforeAbort)) for (const part of turn.converter.push(message)) turn.request.emit(part)
+      else if (turn.unloaded && message.type === "user") {
+        for (const part of turn.converter.push(message)) if (part.type === "tool-result") turn.request.emit(part)
+      }
+    }
+    const flush = (turn: Turn) => {
+      for (const frame of entry.cycle?.frames.splice(0) ?? []) emit(turn, frame.message, frame.beforeAbort)
+    }
     try {
       for await (const message of native) {
         if (message.type === "system" && message.subtype === "init" && message.plugin_errors?.length) {
           throw new Error(`Claude plugin loading failed: ${message.plugin_errors.map((error) => `${error.plugin}: ${error.message}`).join("; ")}`)
         }
         const turn = entry.turn
-        const attributed = message.type === "result" && turn &&
-          (message.user_message_uuid === turn.uuid || message.user_message_uuids?.includes(turn.uuid))
-        if (message.type === "result" && turn?.submitted && !message.user_message_uuid && !message.user_message_uuids?.length) {
+        if (message.type === "system" && message.subtype === "task_notification" && !entry.cycle) entry.autonomousReady = true
+        if (message.type !== "result") {
+          if (message.type === "assistant" || message.type === "stream_event" || message.type === "user") {
+            const root = message.parent_tool_use_id === null
+            if (root && message.type !== "user") {
+              if (!entry.cycle) {
+                entry.cycle = { frames: [], autonomous: entry.autonomousReady === true || !turn?.submitted }
+                entry.autonomousReady = false
+              }
+              const uuids = message.user_message_uuids?.length ? message.user_message_uuids : message.user_message_uuid ? [message.user_message_uuid] : undefined
+              if (uuids) entry.cycle.uuids = uuids
+            }
+            if (turn?.submitted && entry.record.outcome === "pending" && entry.cycle?.uuids?.includes(turn.uuid)) {
+              flush(turn)
+              emit(turn, message)
+            } else if (entry.cycle) entry.cycle.frames.push({ message, beforeAbort: !turn?.aborted })
+          }
+          continue
+        }
+        const attributed = turn && (message.user_message_uuid === turn.uuid || message.user_message_uuids?.includes(turn.uuid))
+        if (turn?.submitted && !message.user_message_uuid && !message.user_message_uuids?.length &&
+          (!(entry.cycle?.autonomous ?? entry.autonomousReady) || entry.cycle?.uuids?.includes(turn.uuid))) {
           throw new Error("Claude returned a result without a prompt UUID; this CLI cannot safely correlate concurrent native activity.")
         }
-        if (!turn?.submitted || entry.record.outcome !== "pending" || (message.type === "result" && !attributed)) {
+        if (!turn?.submitted || entry.record.outcome !== "pending" || !attributed) {
           if (message.type === "result" && message.is_error && turn && !turn.submitted) {
             throw new Error(`Claude startup failed: ${message.subtype}`)
           }
-          entry.background.push(message)
-          if (entry.background.length > 100) entry.background.shift()
-          if (message.type === "result" || (message.type === "system" && message.subtype === "task_notification")) {
-            entry.notices.push(...entry.background.splice(0))
-            entry.notices = entry.notices.slice(-100)
+          entry.cycle = undefined
+          entry.autonomousReady = false
+          if (entry.record.users.length) {
+            entry.notices.push(message)
             this.notify(sessionID, entry)
           }
           continue
         }
-        if (!turn.aborted) for (const part of turn.converter.push(message)) turn.request.emit(part)
-        else if (turn.unloaded && message.type === "user") {
-          for (const part of turn.converter.push(message)) if (part.type === "tool-result") turn.request.emit(part)
-        }
+        flush(turn)
+        entry.cycle = undefined
+        entry.autonomousReady = false
+        emit(turn, message)
         if (message.type === "result") {
           entry.record.outcome = "settled"
           delete entry.record.pendingUUID
@@ -339,11 +403,25 @@ export class Runtime {
   }
 
   private notify(sessionID: string, entry: Entry) {
-    if (entry.notifying || this.disposed) return
+    if (entry.notifying) return
+    if (entry.noticeRetry) clearTimeout(entry.noticeRetry)
+    entry.noticeRetry = undefined
     entry.notifying = (async () => {
       while (entry.notices.length) {
-        const messages = entry.notices.splice(0)
-        await this.backgroundNotice(sessionID, messages).catch((error) => console.error("Full Claude Agent background notice failed", error))
+        const messages = entry.notices.slice()
+        try {
+          await this.backgroundNotice(sessionID, messages, { providerID: entry.providerID, nativeID: entry.record.nativeID, binding: entry.record.binding })
+          entry.notices.splice(0, messages.length)
+          entry.noticeFailures = 0
+        } catch (error) {
+          console.error("Full Claude Agent background notice failed", error)
+          entry.noticeFailures = (entry.noticeFailures ?? 0) + 1
+          if (!this.disposed) entry.noticeRetry = setTimeout(() => {
+            entry.noticeRetry = undefined
+            this.notify(sessionID, entry)
+          }, Math.min(1000 * 2 ** Math.min(entry.noticeFailures - 1, 5), 30_000))
+          break
+        }
       }
     })().finally(() => { entry.notifying = undefined })
   }
@@ -377,9 +455,24 @@ export class Runtime {
       throw new Error("Claude's native response settled, but its matching OpenCode reply is missing or incomplete. No prompt was replayed.")
     }
     const ready: RecordState = { ...entry.record, boundary: historyBoundary(history.slice(0, prefix.length + 1)), outcome: "ready" }
+    if (ready.delivery) {
+      const parts = Array.isArray(reply.content) ? reply.content : []
+      ready.delivery = ready.delivery.filter((response) => !parts.some((part) =>
+        part.type === "text" && part.native?.backgroundResponseID === response.id && part.text === response.text))
+      if (!ready.delivery.length) delete ready.delivery
+    }
     delete ready.checkpoint
     await this.storage.set(this.key(sessionID), ready)
     entry.record = ready
+  }
+
+  private prepared(request: RunRequest): NonNullable<RecordState["checkpoint"]> {
+    const last = request.history.at(-1)
+    const model = last?.model as { providerID?: string } | undefined
+    const placeholder = last?.type === "assistant" && model?.providerID === request.profile.id &&
+      historyBoundary([last]).length === 0 && Array.isArray(last.content) && last.content.length === 0 ? last : undefined
+    return { uuid: randomUUID(), providerID: request.profile.id,
+      preparedHostPrefix: (placeholder ? request.history.slice(0, -1) : request.history).map(digest), assistantID: placeholder?.id }
   }
 
   private async stopEntry(entry: Entry) {
@@ -398,12 +491,14 @@ export class Runtime {
   async dispose() {
     this.disposed = true
     await Promise.allSettled([...this.entries.values()].map(async (entry) => {
+      if (entry.noticeRetry) clearTimeout(entry.noticeRetry)
       entry.permissions?.abort()
       if (entry.turn) {
         entry.turn.unloaded = new Error("Full Claude Agent was unloaded during this turn. Native work was interrupted; check tool outcomes before retrying.")
         await this.interrupt(entry.turn.request.sessionID, entry, entry.turn)
       }
       await this.stopEntry(entry)
+      await entry.notifying
     }))
     this.entries.clear()
   }

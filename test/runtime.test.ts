@@ -12,6 +12,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { DELEGATION_SERVER } from "../src/delegation-mcp"
 import { createInteractions } from "../src/interactions"
 import type { Plugin } from "@opencode/plugin"
+import { emptyUsage, type BackgroundResponse } from "../src/background"
 
 class Queue<T> {
   private values: T[] = []
@@ -79,6 +80,11 @@ class FakeQuery implements NativeQuery {
   }
   close() { this.closed++; this.output.end(); this.didClose.resolve() }
   send(message: unknown) {
+    const frame = message as Record<string, unknown>
+    if ((frame.type === "assistant" || frame.type === "stream_event") && frame.parent_tool_use_id === null &&
+      !("user_message_uuid" in frame) && this.inputs.length) {
+      message = { ...frame, user_message_uuid: this.inputs.at(-1)!.uuid }
+    }
     const read = Promise.withResolvers<void>()
     this.output.push({ message: message as SDKMessage, read })
     return read.promise
@@ -141,6 +147,338 @@ function harness(storage = new MemoryStorage(), initialize = true, onNotice?: (m
 }
 
 describe("Runtime", () => {
+  async function completedSession() {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    await q.send(result((await q.input.take()).uuid!))
+    await run.done
+    await h.runtime.checkpoint("session", async () => history)
+    const response: BackgroundResponse = { id: "cached-report", providerID: "one", nativeID: h.storage.record().nativeID,
+      binding: h.storage.record().binding, text: "The complete saved report.", usage: {
+        inputTokens: { total: 13, noCache: 13, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 21, text: undefined, reasoning: undefined },
+      } }
+    const wake: HistoryEntry = { id: "wake", type: "synthetic", text: "Full Claude Agent background response available.",
+      metadata: { fullClaudeAgentBackground: response } }
+    return { h, q, response, wake }
+  }
+
+  test("a fresh runtime delivers a cached report without opening a query", async () => {
+    const { h, response, wake } = await completedSession()
+    const restarted = harness(h.storage)
+    const run = restarted.run({ history: [...history, wake] })
+    await run.done
+    expect(restarted.queries).toEqual([])
+    expect(run.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([response.text])
+    expect(run.parts.filter((part) => part.type === "text-start" || part.type === "text-end")).toEqual([
+      { type: "text-start", id: `background-${response.id}`, providerMetadata: { one: { backgroundResponseID: response.id } } },
+      { type: "text-end", id: `background-${response.id}`, providerMetadata: { one: { backgroundResponseID: response.id } } },
+    ])
+    expect(run.parts.filter((part) => part.type === "finish")).toEqual([expect.objectContaining({ usage: response.usage })])
+    expect(h.storage.record().delivery).toEqual([response])
+  }, 2000)
+
+  test.each(["load", "claim"])("disposal during a paused cached delivery %s rejects without emitting", async (phase) => {
+    const { h, wake } = await completedSession()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    if (phase === "load") {
+      const get = h.storage.get.bind(h.storage)
+      h.storage.get = async (key) => {
+        const saved = await get(key)
+        entered.resolve()
+        await release.promise
+        return saved
+      }
+    } else {
+      const set = h.storage.set.bind(h.storage)
+      h.storage.set = async (key, value) => {
+        await set(key, value)
+        if (value.delivery) { entered.resolve(); await release.promise }
+      }
+    }
+    const restarted = harness(h.storage)
+    const run = restarted.run({ history: [...history, wake] })
+    await entered.promise
+    await restarted.runtime.dispose()
+    release.resolve()
+    await expect(run.done).rejects.toThrow("unloaded")
+    expect(run.parts).toEqual([])
+    expect(restarted.queries).toEqual([])
+  }, 2000)
+
+  test("distinct report IDs with identical text are each delivered once", async () => {
+    const { h, q, response, wake } = await completedSession()
+    const second = { ...wake, id: "second-wake", metadata: { fullClaudeAgentBackground: { ...response, id: "second-report" } } }
+    const run = h.run({ history: [...history, wake, second] })
+    await run.done
+    expect(run.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([response.text, response.text])
+    expect(run.parts.filter((part) => part.type === "finish")).toHaveLength(1)
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test.each(["identical", "substring"])("saving only the first report acknowledges only its ID when the second report text is %s", async (kind) => {
+    const { h, q, response, wake } = await completedSession()
+    const secondResponse = { ...response, id: "second-report", text: kind === "identical" ? response.text : response.text.slice(4) }
+    const secondWake = { ...wake, id: "second-wake", metadata: { fullClaudeAgentBackground: secondResponse } }
+    const preparedHistory = [...history, wake, secondWake]
+    const run = h.request({ history: preparedHistory })
+    run.value.emit = (part) => {
+      run.parts.push(part)
+      if (part.type === "text-start" && part.id === `background-${secondResponse.id}`) throw new Error("host stream closed before second report")
+    }
+    await expect(h.runtime.run(run.value)).rejects.toThrow("host stream closed before second report")
+    const saved = [...preparedHistory, { id: "first-report-only", type: "assistant", model: { providerID: "one" }, finish: "stop",
+      content: [{ type: "text", text: response.text, native: { backgroundResponseID: response.id } }] }]
+    await h.runtime.checkpoint("session", async () => saved)
+    expect(h.storage.record().delivery).toEqual([secondResponse])
+    const restarted = harness(h.storage)
+    const retry = restarted.run({ history: saved })
+    await retry.done
+    expect(retry.parts.filter((part) => part.type === "text-start")).toEqual([
+      expect.objectContaining({ id: `background-${secondResponse.id}`, providerMetadata: { one: { backgroundResponseID: secondResponse.id } } }),
+    ])
+    expect(retry.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([secondResponse.text])
+    expect(restarted.queries).toEqual([])
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test.each(["missing marker", "unknown marker", "partial text", "extra text"])("a saved host reply with %s does not acknowledge a cached report", async (kind) => {
+    const { h, response, wake } = await completedSession()
+    await h.run({ history: [...history, wake] }).done
+    const native = kind === "missing marker" ? undefined : { backgroundResponseID: kind === "unknown marker" ? "unknown-report" : response.id }
+    const text = kind === "partial text" ? response.text.slice(0, -1) : kind === "extra text" ? `${response.text} Extra` : response.text
+    const saved = [...history, wake, { id: "unacknowledged-report", type: "assistant", model: { providerID: "one" }, finish: "stop",
+      content: [{ type: "text", text, ...(native ? { native } : {}) }] }]
+    await h.runtime.checkpoint("session", async () => saved)
+    expect(h.storage.record().delivery).toEqual([response])
+    const restarted = harness(h.storage)
+    const retry = restarted.run({ history: saved })
+    await retry.done
+    expect(retry.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([response.text])
+    expect(restarted.queries).toEqual([])
+  }, 2000)
+
+  test("a failed background notice batch is retained and retried without another SDK result", async () => {
+    const retried = Promise.withResolvers<void>()
+    const errorLog = spyOn(console, "error").mockImplementation(() => {})
+    let attempts = 0
+    try {
+      const h = harness(new MemoryStorage(), true, async () => {
+        if (attempts++ === 0) throw new Error("publisher temporarily unavailable")
+        retried.resolve()
+      })
+      const run = h.run()
+      const q = await h.opened.take()
+      const input = await q.input.take()
+      await q.send({ ...result("autonomous-cycle"), uuid: "retry-result", result: "Report must survive rejection" })
+      await q.send(result(input.uuid!))
+      await run.done
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([retried.promise, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Failed background notice was not retried within 3 seconds")), 3000)
+        })])
+      } finally { clearTimeout(timer) }
+      expect(attempts).toBe(2)
+      expect(h.notices).toHaveLength(2)
+      expect(h.notices[1]).toEqual(h.notices[0])
+      expect(h.notices[1]![0]).toMatchObject({ uuid: "retry-result", result: "Report must survive rejection" })
+      expect(q.inputs).toHaveLength(1)
+    } finally { errorLog.mockRestore() }
+  }, 4000)
+
+  test("a root cycle started during a pending turn rejects an unattributed result explicitly", async () => {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    await q.input.take()
+    await q.send({ ...assistant("unstamped", "Cannot safely attribute"), user_message_uuid: undefined })
+    void q.send({ ...result("unused"), user_message_uuid: undefined })
+    await expect(run.done).rejects.toThrow("without a prompt UUID")
+    expect(run.parts).toEqual([])
+    expect(h.notices).toEqual([])
+    expect(h.storage.record().outcome).toBe("uncertain")
+  }, 2000)
+
+  test("disposal cancels a failed background notice retry", async () => {
+    const logged = Promise.withResolvers<void>()
+    const errorLog = spyOn(console, "error").mockImplementation(() => { logged.resolve() })
+    let attempts = 0
+    try {
+      const h = harness(new MemoryStorage(), true, async () => {
+        attempts++
+        throw new Error("publisher unavailable")
+      })
+      const run = h.run()
+      const q = await h.opened.take()
+      await q.send(result((await q.input.take()).uuid!))
+      await run.done
+      await q.send({ ...result("autonomous-cycle"), uuid: "pending-retry" })
+      await logged.promise
+      q.close()
+      await h.runtime.dispose()
+      await Bun.sleep(1200)
+      expect(attempts).toBe(1)
+    } finally { errorLog.mockRestore() }
+  }, 2000)
+
+  test("an unattributed cycle started while idle remains background when a typed user arrives mid-cycle", async () => {
+    const { h, q } = await completedSession()
+    await q.send({ ...assistant("idle-cycle", "Autonomous answer"), user_message_uuid: undefined })
+    const run = h.run({ history: [...history, { id: "second", type: "user", content: "Typed follow-up" }],
+      prompt: [user("first"), user("Typed follow-up")] })
+    const input = await q.input.take()
+    await q.send({ ...result("unused"), uuid: "idle-result", user_message_uuid: undefined, result: "Autonomous answer" })
+    expect(run.parts).toEqual([])
+    expect(h.notices.flat()).toEqual([expect.objectContaining({ uuid: "idle-result", result: "Autonomous answer" })])
+    expect(h.storage.record().outcome).toBe("pending")
+    await q.send(assistant("typed-answer", "Typed answer"))
+    await q.send(result(input.uuid!))
+    await run.done
+    expect(run.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual(["Typed answer"])
+    expect(run.parts.filter((part) => part.type === "finish")).toHaveLength(1)
+    expect(q.inputs).toHaveLength(2)
+  }, 2000)
+
+  test("duplicate and already checkpointed wakes never enqueue another SDK prompt", async () => {
+    const { h, q, response, wake } = await completedSession()
+    const duplicated = { ...wake, id: "duplicate-wake" }
+    const delivered = h.run({ history: [...history, wake, duplicated] })
+    await delivered.done
+    expect(delivered.parts.filter((part) => part.type === "text-delta")).toHaveLength(1)
+    const saved = [...history, wake, duplicated, { id: "report-reply", type: "assistant", model: { providerID: "one" },
+      finish: "stop", content: [{ type: "text", text: response.text, native: { backgroundResponseID: response.id } }] }]
+    await h.runtime.checkpoint("session", async () => saved)
+    expect(h.storage.record().delivery).toBeUndefined()
+    const stale = h.run({ history: saved })
+    await stale.done
+    expect(stale.parts.filter((part) => part.type === "text-delta")).toEqual([])
+    expect(stale.parts.filter((part) => part.type === "finish")).toHaveLength(1)
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("a report mixed with a real user submits only that user once and finishes once", async () => {
+    const { h, q, response, wake } = await completedSession()
+    const run = h.run({ history: [...history, wake, { id: "second", type: "user", content: "Actual follow-up" }],
+      prompt: [user("first"), { role: "assistant", content: [{ type: "text", text: "answer" }] }, user("Actual follow-up")] })
+    const input = await q.input.take()
+    expect(input.message.content).toEqual([{ type: "text", text: "Actual follow-up" }])
+    await q.send(assistant("follow-up-answer", "New answer"))
+    await q.send(result(input.uuid!))
+    await run.done
+    expect(q.inputs).toHaveLength(2)
+    expect(run.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([response.text, "New answer"])
+    expect(run.parts.filter((part) => part.type === "finish")).toEqual([expect.objectContaining({ usage: {
+      inputTokens: { total: 14, noCache: 14, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 23 },
+    } })])
+  }, 2000)
+
+  test.each(["providerID", "nativeID", "binding"] as const)("rejects a cached report with a different %s before emission", async (field) => {
+    const { h, q, response, wake } = await completedSession()
+    const run = h.run({ history: [...history, { ...wake, metadata: { fullClaudeAgentBackground: { ...response, [field]: "other" } } }] })
+    await expect(run.done).rejects.toThrow("another Claude session or configuration")
+    expect(run.parts).toEqual([])
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("a failed delivery claim emits no answer and submits no SDK prompt", async () => {
+    const { h, q, wake } = await completedSession()
+    const set = h.storage.set.bind(h.storage)
+    h.storage.set = async (key, value) => {
+      if (value.delivery) throw new Error("delivery storage unavailable")
+      await set(key, value)
+    }
+    const run = h.run({ history: [...history, wake] })
+    await expect(run.done).rejects.toThrow("delivery storage unavailable")
+    expect(run.parts).toEqual([])
+    expect(q.inputs).toHaveLength(1)
+    expect(h.storage.record().delivery).toBeUndefined()
+  }, 2000)
+
+  test.each(["partial", "cancelled", "cancelled during emission"])("a %s host delivery retains the complete report for a fresh-runtime retry", async (kind) => {
+    const { h, q, response, wake } = await completedSession()
+    const run = h.request({ history: [...history, wake] })
+    if (kind === "partial") run.value.emit = (part) => {
+      run.parts.push(part)
+      if (part.type === "text-delta") throw new Error("host stream closed")
+    }
+    else if (kind === "cancelled during emission") run.value.emit = (part) => {
+      run.parts.push(part)
+      if (part.type === "text-delta") run.controller.abort(new Error("delivery cancelled"))
+    }
+    else {
+      const set = h.storage.set.bind(h.storage)
+      h.storage.set = async (key, value) => {
+        await set(key, value)
+        if (value.delivery) run.controller.abort(new Error("delivery cancelled"))
+      }
+    }
+    await expect(h.runtime.run(run.value)).rejects.toThrow(kind === "partial" ? "host stream closed" : "delivery cancelled")
+    expect(run.parts.filter((part) => part.type === "finish")).toEqual([])
+    expect(h.storage.record().delivery).toEqual([response])
+    expect(q.inputs).toHaveLength(1)
+    const saved = [...history, wake, { id: "partial-reply", type: "assistant", model: { providerID: "one" },
+      finish: "stop", content: [{ type: "text", text: "The complete", native: { backgroundResponseID: response.id } }] }]
+    await h.runtime.checkpoint("session", async () => saved)
+    expect(h.storage.record().delivery).toEqual([response])
+    const restarted = harness(h.storage)
+    const retry = restarted.run({ history: saved })
+    await retry.done
+    expect(restarted.queries).toEqual([])
+    expect(retry.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual([response.text])
+    expect(retry.parts.filter((part) => part.type === "finish")).toHaveLength(1)
+  }, 2000)
+
+  test("autonomous root frames while a typed request is pending are delivered only through the background notice", async () => {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    await q.send({ ...assistant("autonomous", "Saved background answer"), user_message_uuid: undefined })
+    await q.send({ ...result("autonomous-cycle"), uuid: "autonomous-result", result: "Saved background answer" })
+    expect(run.parts).toEqual([])
+    expect(h.notices.flat()).toEqual([expect.objectContaining({ uuid: "autonomous-result", result: "Saved background answer" })])
+    await q.send(assistant("typed", "Typed answer"))
+    await q.send(result(input.uuid!))
+    await run.done
+    expect(run.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual(["Typed answer"])
+    expect(run.parts.filter((part) => part.type === "finish")).toHaveLength(1)
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("a synthetic SDK cycle can absorb the typed user UUID before its result", async () => {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    await q.send({ ...assistant("synthetic-start", "Combined "), user_message_uuid: "synthetic-cycle" })
+    expect(run.parts).toEqual([])
+    await q.send({ ...assistant("absorbed", "answer"), user_message_uuid: undefined, user_message_uuids: ["synthetic-cycle", input.uuid] })
+    await q.send({ ...result("synthetic-cycle"), user_message_uuids: ["synthetic-cycle", input.uuid] })
+    await run.done
+    expect(run.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual(["Combined ", "answer"])
+    expect(run.parts.filter((part) => part.type === "finish")).toHaveLength(1)
+    expect(h.notices).toEqual([])
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("delivers a completed native background answer without another Claude submission", async () => {
+    const h = harness()
+    const first = h.run()
+    const q = await h.opened.take()
+    await q.send(result((await q.input.take()).uuid!))
+    await first.done
+    await q.send(assistant("research-answer", "The research is complete."))
+    await q.send({ ...result("native-notification"), uuid: "background-result", result: "The research is complete." })
+    const delivery = h.run({ history: [...history, { id: "wake", type: "synthetic", text: "Deliver native background response",
+      metadata: { fullClaudeAgentBackground: { id: "background-result", providerID: "one", nativeID: h.storage.record().nativeID,
+        binding: h.storage.record().binding, text: "The research is complete.", usage: emptyUsage() } } }] })
+    await delivery.done
+    expect(delivery.parts.filter((part) => part.type === "text-delta").map((part) => part.delta)).toEqual(["The research is complete."])
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
   test("reload disposal preserves the interrupted native tool result and fails the turn explicitly", async () => {
     const h = harness()
     const run = h.run()

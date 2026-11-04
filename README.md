@@ -125,7 +125,7 @@ Use native Claude `Agent` for workflows that depend on native subagent hooks. An
 - OpenCode plugin storage saves the Claude transcript ID and which user messages have already been submitted. Follow-ups, including after restart, resume the same Claude transcript and send only new user messages. Before sending a follow-up, the plugin checks that OpenCode has saved the matching completed assistant reply and that earlier conversation history has not changed.
 - Cancellation interrupts Claude and drains the result before another submission. A timeout or crash with an unresolved submission is an uncertain outcome: the plugin rejects automatic replay rather than repeating possible tool side effects.
 - Reloading or unloading the provider interrupts active native work. OpenCode reports the unload and retains returned tool outcomes. A tool without a final native result is marked interrupted with an unknown outcome; inspect its effects before retrying.
-- Native background processes remain alive while the plugin is loaded. Their permission requests stay attached to the owning OpenCode session after the foreground turn ends. Completion notices are appended without waking OpenCode automatically; the next user turn can consume them. Full background orchestration and tool rendering while the host is idle remain incomplete.
+- Native background processes remain alive while the plugin is loaded. Their permission requests stay attached to the owning OpenCode session after the foreground turn ends. Completed native parent responses automatically appear as OpenCode assistant messages without another user prompt or another Claude request. Delivery waits if a different provider is selected. Background tool activity is not streamed while the host is idle.
 - Changing model or effort while the native process is alive requires a new session. Native background work is not terminated merely to change a model.
 - Claude owns native compaction. OpenCode compaction, forks, rewind, existing-conversation import, and auxiliary `session.generate` requests are unsupported. Titles use the initial prompt without an additional model request.
 - OpenCode custom-agent instructions and plan-mode behavior are not propagated to Claude. The native query starts in Claude's default permission mode and uses Claude's own instructions and settings. Host integrations beyond the question, permission, and delegation bridges described above are not forwarded.
@@ -201,7 +201,7 @@ bun run scripts/probe-accounts.ts --show-identity "$HOME/.claude" "$HOME/.claude
 
 Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other-config-dir> ...]`. Missing SDK identity fields are omitted; the probe does not infer them. Neither mode prints credentials or token values. The probe still loads user settings and can start configured integrations. Configuration paths, identity hashes, opted-in email/organization output, and retained integration-test diagnostics should be treated as private; do not commit or publish them.
 
-### Verified on 2026-11-03
+### Verified through 2026-11-04
 
 - [x] TypeScript check and offline test suite.
 - [x] Native fixture hooks, plugin discovery, transcript access, and resume through the installed Claude CLI.
@@ -216,6 +216,7 @@ Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other
 - [x] Foreground delegation from Full Claude Agent to an OpenCode model, including current-generation selection from a family-name query and the child response returned to Claude.
 - [x] Interrupting a Full Claude parent stops its delegated OpenCode child; both sessions finish cancellation cleanup.
 - [x] Native Edit/Write diff metadata, with rejected and failed operations excluded.
+- [x] Native background permission approval and rejection, native hooks, and automatic delivery of the parent's completed report without another user prompt.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 

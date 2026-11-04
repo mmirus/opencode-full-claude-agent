@@ -1,5 +1,4 @@
 import { Model, Plugin, Provider } from "@opencode/plugin"
-import { Session } from "@opencode/schema/session"
 import { randomUUID } from "node:crypto"
 import { parseProfiles } from "./config.js"
 import { FullClaudeModel, KIND_HEADER } from "./model.js"
@@ -8,6 +7,7 @@ import { fromPromise } from "@opencode/plugin/promise/adapter"
 import { Plugin as EffectPlugin } from "@opencode/plugin/effect"
 import { Effect } from "effect"
 import { requestContext } from "./request-context.js"
+import { backgroundResponse, createBackgroundPublisher } from "./background.js"
 
 const PACKAGE = "opencode-full-claude-agent/runtime"
 
@@ -17,19 +17,8 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
     const profiles = parseProfiles(ctx.options, ctx.location.directory)
     // OpenCode 2.2.5 caches model instances across hook disposal; each plugin lifetime needs a fresh key.
     const lifetime = randomUUID()
-    const runtime = new Runtime(ctx.storage, undefined, async (sessionID, messages) => {
-      const notices = messages.flatMap((message) => {
-        if (message.type === "system" && message.subtype === "task_notification") return [message.summary]
-        if (message.type === "result" && message.subtype === "success") return [message.result]
-        return []
-      }).filter(Boolean)
-      if (!notices.length) return
-      await ctx.session.synthetic({
-        sessionID: Session.ID.make(sessionID),
-        text: `Native Claude background activity completed. Report the outcome without repeating the work.\n\n${notices.join("\n\n")}`,
-        resume: false,
-      })
-    })
+    const background = createBackgroundPublisher(ctx)
+    const runtime = new Runtime(ctx.storage, undefined, background.publish)
 
     await ctx.provider.transform((editor) => {
       for (const profile of profiles) {
@@ -55,13 +44,17 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
         event.sdk = { languageModel: (modelID: string) => new FullClaudeModel(modelID, profile, ctx, runtime, lease) }
       }, scope)
       await ctx.session.hook("model.request", (event) => { event.headers[KIND_HEADER] = event.kind }, scope)
-      await ctx.session.hook("context", (event) => {
+      await ctx.session.hook("context", async (event) => {
+        const history = await ctx.session.context({ sessionID: event.sessionID })
+        const control = new Set(history.filter((message) => backgroundResponse(message)?.providerID === profile.id).map((message) => message.id))
+        event.messages = event.messages.filter((message) => !message.id || !control.has(message.id))
         event.tools = {}
         delete event.options.maxTokens
       }, scope)
       await ctx.session.hook("retry", (event) => { event.decision = { retry: false } }, scope)
-      await ctx.session.hook("title", (event) => {
-        const text = event.messages.flatMap((message) => message.role === "user" ? message.content.filter((part) => part.type === "text").map((part) => part.text) : []).join(" ")
+      await ctx.session.hook("title", async (event) => {
+        const messages = await ctx.session.context({ sessionID: event.sessionID })
+        const text = messages.find((message) => message.type === "user")?.text ?? ""
         event.result = text.replace(/\s+/g, " ").trim().slice(0, 80) || "Full Claude Agent"
       }, scope)
       await ctx.session.hook("compaction", () => {
@@ -93,7 +86,9 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
         } catch (error) { console.error("Full Claude Agent checkpoint failed", error) }
       }
     })().catch((error) => { if (!abort.signal.aborted) console.error("Full Claude Agent checkpoint failed", error) })
+    void background.recover().catch((error) => console.error("Full Claude Agent background recovery failed", error))
     return async () => {
+      background.stop()
       abort.abort()
       await runtime.dispose()
       await events

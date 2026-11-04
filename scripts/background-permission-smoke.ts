@@ -124,7 +124,7 @@ try {
   }, { signal: abort.signal })
   sessionID = session.id
   save("run.json", { sessionID, root, allowed, denied })
-  await client.session.prompt({ sessionID, text: `This is an isolated native background permission integration test. Launch exactly one native Agent with run_in_background=true and model=haiku. Give it this task: Use native Write to create ${allowed} containing BACKGROUND_APPROVED, then use native Write to create ${denied} containing MUST_NOT_EXIST. If a Write is denied, do not retry or use another tool. Do not read files or run commands. After both attempts, report the outcomes. You, the parent, must return BACKGROUND_LAUNCHED immediately after launching the Agent. Do not wait, poll, or call TaskOutput: a test gate releases the background Write only when your foreground turn ends.` }, { signal: abort.signal })
+  await client.session.prompt({ sessionID, text: `This is an isolated native background permission integration test. Launch exactly one native Agent with run_in_background=true and model=haiku. Give it this task: Use native Write to create ${allowed} containing BACKGROUND_APPROVED, then use native Write to create ${denied} containing MUST_NOT_EXIST. If a Write is denied, do not retry or use another tool. Do not read files or run commands. After both attempts, report the outcomes. You, the parent, must return BACKGROUND_LAUNCHED immediately after launching the Agent. Do not wait, poll, or call TaskOutput: a test gate releases the background Write only when your foreground turn ends. When the Agent later finishes, report its outcomes and include PARENT_BACKGROUND_REPORTED in that final report.` }, { signal: abort.signal })
   await decisions.promise
   const writeDeadline = Date.now() + 30_000
   while (!existsSync(allowed)) {
@@ -156,8 +156,24 @@ try {
     await Bun.sleep(100)
   }
   assert(!existsSync(denied), "Rejected background Write created a file after receiving its result")
-  save("success.json", { sessionID, idle, asked, approvedFileCreated: true, deniedFileAbsent: true, nativeHooksRan: true })
-  console.log("PASS: native background approval and rejection reached the idle owning session; native hooks ran.")
+  const reportDeadline = Date.now() + 60_000
+  while (true) {
+    abort.signal.throwIfAborted()
+    const messages = await client.session.context({ sessionID }, { signal: abort.signal })
+    const reports = messages.filter((message) => message.type === "assistant" && message.finish === "stop" &&
+      message.content.some((part) => part.type === "text" && part.text.includes("PARENT_BACKGROUND_REPORTED")))
+    if (reports.length) {
+      assert.equal(reports.length, 1, "Native report was delivered more than once")
+      assert.equal(messages.filter((message) => message.type === "user").length, 1, "Reporting required another user prompt")
+      save("reported-context.json", messages)
+      break
+    }
+    assert(Date.now() < reportDeadline, "Native background report did not reach OpenCode automatically")
+    await Bun.sleep(100)
+  }
+  assert(!readFileSync(rejected.transcript_path, "utf8").includes("Full Claude Agent background response available."), "Host delivery wake was submitted to Claude")
+  save("success.json", { sessionID, idle, asked, approvedFileCreated: true, deniedFileAbsent: true, nativeHooksRan: true, automaticAssistantReport: true })
+  console.log("PASS: native background permissions and hooks work; the parent report reaches OpenCode automatically without another user prompt.")
 } catch (error) {
   save("failure.json", { message: String(error) })
   console.error(error)
