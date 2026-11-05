@@ -7,6 +7,7 @@ import { assertHistory, digest, historyBoundary, newContent, userFingerprints, t
 import { createStreamConverter } from "./stream.js"
 import { createDelegationMcp, DELEGATION_INSTRUCTIONS, DELEGATION_SERVER, type ActiveDelegation } from "./delegation-mcp.js"
 import { addUsage, backgroundParts, backgroundResponse, emptyUsage, type BackgroundOwner, type BackgroundResponse } from "./background.js"
+import type { NativeTaskStore } from "./tasks.js"
 
 export interface Storage {
   get(key: string): Promise<unknown>
@@ -16,6 +17,7 @@ export interface NativeQuery extends AsyncIterable<SDKMessage> {
   initializationResult(): ReturnType<Query["initializationResult"]>
   interrupt(): Promise<unknown>
   close(): void
+  stopTask?(taskID: string): Promise<void>
 }
 export type QueryFactory = (input: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => NativeQuery
 export interface RunRequest {
@@ -97,6 +99,7 @@ export class Runtime {
     private storage: Storage,
     private factory: QueryFactory = query,
     private backgroundNotice: (sessionID: string, messages: SDKMessage[], owner: BackgroundOwner) => Promise<void> = async () => {},
+    private tasks?: NativeTaskStore,
   ) {}
 
   private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
@@ -241,7 +244,8 @@ export class Runtime {
     const permissions = new AbortController()
     const interactions = request.interactions(permissions.signal)
     entry.permissions = permissions
-    const cleanup = () => { permissions.abort(); interactions.dispose?.() }
+    let taskConnection: ReturnType<NativeTaskStore["connect"]> | undefined
+    const cleanup = () => { taskConnection?.close(); permissions.abort(); interactions.dispose?.() }
     const options: Options = {
       cwd: directory,
       env,
@@ -272,9 +276,11 @@ export class Runtime {
     try { native = this.factory({ prompt: input, options }) }
     catch (error) { cleanup(); throw error }
     entry.native = native
+    taskConnection = this.tasks?.connect({ sessionID: request.sessionID, providerID: request.profile.id, nativeID: entry.record.nativeID },
+      native.stopTask ? (taskID) => native.stopTask!(taskID) : undefined)
     entry.launch = launch
     entry.failure = undefined
-    entry.pump = this.read(request.sessionID, entry, native, cleanup)
+    entry.pump = this.read(request.sessionID, entry, native, cleanup, (message) => taskConnection?.observe(message))
     const cancelled = Promise.withResolvers<never>()
     const signal = AbortSignal.any([request.signal, entry.turn!.operations.signal])
     const onAbort = () => cancelled.reject(signal.reason)
@@ -290,7 +296,7 @@ export class Runtime {
     } finally { signal.removeEventListener("abort", onAbort) }
   }
 
-  private async read(sessionID: string, entry: Entry, native: NativeQuery, cleanup: () => void) {
+  private async read(sessionID: string, entry: Entry, native: NativeQuery, cleanup: () => void, observe: (message: SDKMessage) => void) {
     const emit = (turn: Turn, message: SDKMessage, beforeAbort = false) => {
       if (!turn.aborted || (turn.unloaded && beforeAbort)) for (const part of turn.converter.push(message)) turn.request.emit(part)
       else if (turn.unloaded && message.type === "user") {
@@ -302,6 +308,7 @@ export class Runtime {
     }
     try {
       for await (const message of native) {
+        observe(message)
         if (message.type === "system" && message.subtype === "init" && message.plugin_errors?.length) {
           throw new Error(`Claude plugin loading failed: ${message.plugin_errors.map((error) => `${error.plugin}: ${error.message}`).join("; ")}`)
         }

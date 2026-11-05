@@ -8,6 +8,9 @@ import { Plugin as EffectPlugin } from "@opencode/plugin/effect"
 import { Effect } from "effect"
 import { requestContext } from "./request-context.js"
 import { backgroundResponse, createBackgroundPublisher } from "./background.js"
+import { NativeTaskStore } from "./tasks.js"
+import { NativeTasks } from "./task-rpc.js"
+import type { RpcRegistration } from "@opencode/plugin/promise/rpc"
 
 const PACKAGE = "opencode-full-claude-agent/runtime"
 
@@ -18,7 +21,15 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
     // OpenCode 2.2.5 caches model instances across hook disposal; each plugin lifetime needs a fresh key.
     const lifetime = randomUUID()
     const background = createBackgroundPublisher(ctx)
-    const runtime = new Runtime(ctx.storage, undefined, background.publish)
+    let taskRPC: RpcRegistration<typeof NativeTasks> | undefined
+    const tasks = new NativeTaskStore(ctx.storage, async (sessionID) => { await taskRPC?.events.emit("changed", { sessionID }) })
+    await tasks.restore()
+    taskRPC = await ctx.rpc.register(NativeTasks, {
+      list: async ({ sessionID }) => ({ tasks: tasks.list(sessionID) }),
+      output: ({ sessionID, id }) => tasks.output(sessionID, id),
+      stop: ({ sessionID, id }) => tasks.stop(sessionID, id),
+    })
+    const runtime = new Runtime(ctx.storage, undefined, background.publish, tasks)
 
     await ctx.provider.transform((editor) => {
       for (const profile of profiles) {
@@ -91,6 +102,8 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
       background.stop()
       abort.abort()
       await runtime.dispose()
+      await tasks.dispose()
+      await taskRPC?.dispose()
       await events
     }
   },

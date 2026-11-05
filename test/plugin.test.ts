@@ -11,6 +11,7 @@ test("background delivery controls are removed by message identity without hidin
   const ctx = {
     options: {}, location: { directory: process.cwd() },
     storage: { get: async () => undefined, set: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: { register: async () => ({ ...registration, events: { emit: async () => {} } }) },
     provider: { transform: async () => registration }, aisdk: { hook: async () => registration },
     session: {
       hook: async (name: string, handler: typeof context) => { if (name === "context") context = handler; return registration },
@@ -48,6 +49,7 @@ test.each([
   const ctx = {
     options: {}, location: { directory: process.cwd() },
     storage: { get: async () => undefined, set: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: { register: async () => ({ ...registration, events: { emit: async () => {} } }) },
     provider: { transform: async () => registration },
     aisdk: { hook: async () => registration },
     session: {
@@ -78,6 +80,7 @@ test("reloaded registrations cannot reuse a cached model from a disposed runtime
     options: {},
     location: { directory: process.cwd() },
     storage: { get: async () => undefined, set: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: { register: async () => ({ ...registration, events: { emit: async () => {} } }) },
     provider: { transform: async (callback: (editor: unknown) => void) => {
       callback({ add: (provider: typeof providers[number]) => providers.push(provider) })
       return registration

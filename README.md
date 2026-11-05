@@ -119,6 +119,16 @@ Delegation reuses OpenCode's subagent executor, including its permission checks,
 
 Use native Claude `Agent` for workflows that depend on native subagent hooks. An OpenCode-managed child does not produce a native `Agent` transcript or a `SubagentStop` event in the parent Claude session. Claude's native toolset and configured MCP servers remain available alongside the delegation bridge.
 
+## Native background tasks in the terminal
+
+The bundled TUI extension shows **Claude tasks: N running** above the composer while nonambient native tasks are running, including after the foreground turn ends. Click the indicator, run `/claude-tasks`, or choose **Open Claude tasks** from the command palette to inspect task descriptions, elapsed time, state, and captured output. Completed task history remains available through the command.
+
+In the task viewer, use Up/Down to select a task, Page Up/Page Down to scroll output, `r` to refresh, `s` to request a stop, `a` to show ambient tasks, `f` for fullscreen, and Escape to close. Stop targets the owning Claude process through the SDK; the task remains running until Claude confirms an outcome. Ambient watchers are excluded from the running count and hidden by default.
+
+Output viewing reads at most the last 64 KiB from a registered native task file and strips terminal control sequences. The SDK does not expose a public output-read method, so this uses Claude's task-file layout and can be unavailable if that layout changes. Output redirected by a command into a separate log is not captured automatically. Missing or unsupported output files are reported explicitly.
+
+The viewer uses stock OpenCode's plugin UI, not its built-in Shell tab. Native tasks still execute in Claude, with native hooks and permissions. Unconfirmed running tasks become **unknown** when their Claude connection closes or the provider restarts; the viewer does not assume they completed or restart them. This task viewer is terminal-only.
+
 ## Session behavior and limits
 
 - A primary OpenCode session keeps a streaming-input Claude process alive between turns. The native `Stop` hook's continuation finishes before OpenCode marks the turn complete.
@@ -169,6 +179,7 @@ FULL_CLAUDE_LIVE=1 bun run scripts/cancel-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/checkpoint-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/background-permission-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/reload-smoke.ts
+FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/native-task-smoke.ts
 FULL_CLAUDE_LIVE=1 bun run test:permission
 FULL_CLAUDE_LIVE=1 bun run test:diff
 bun run scripts/probe-accounts.ts "$HOME/.claude" "$HOME/.claude-secondary"
@@ -201,7 +212,7 @@ bun run scripts/probe-accounts.ts --show-identity "$HOME/.claude" "$HOME/.claude
 
 Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other-config-dir> ...]`. Missing SDK identity fields are omitted; the probe does not infer them. Neither mode prints credentials or token values. The probe still loads user settings and can start configured integrations. Configuration paths, identity hashes, opted-in email/organization output, and retained integration-test diagnostics should be treated as private; do not commit or publish them.
 
-### Verified through 2026-11-04
+### Verified through 2026-11-05
 
 - [x] TypeScript check and offline test suite.
 - [x] Native fixture hooks, plugin discovery, transcript access, and resume through the installed Claude CLI.
@@ -217,6 +228,8 @@ Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other
 - [x] Interrupting a Full Claude parent stops its delegated OpenCode child; both sessions finish cancellation cleanup.
 - [x] Native Edit/Write diff metadata, with rejected and failed operations excluded.
 - [x] Native background permission approval and rejection, native hooks, and automatic delivery of the parent's completed report without another user prompt.
+- [x] Native task visibility after foreground completion, captured-output reading, and SDK Stop with a confirmed stopped outcome and no command replay.
+- [x] Stock terminal UI loads the companion task viewer; narrow-terminal rendering has been exercised.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 
@@ -232,5 +245,7 @@ This plugin is [MIT-licensed](LICENSE). Claude Code, the Claude Agent SDK, OpenC
 - [OpenCode server plugin API](https://opencode.ai/v2/docs/build/plugins/server)
 - [T3 Claude query options](https://github.com/pingdotgg/t3code/blob/cefb544af3c98224874419198c0359b652ca3c94/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts#L1526-L1684)
 - [T3 per-instance Claude home](https://github.com/pingdotgg/t3code/blob/cefb544af3c98224874419198c0359b652ca3c94/apps/server/src/provider/Drivers/ClaudeHome.ts)
+- [T3 native task lifecycle](https://github.com/pingdotgg/t3code/blob/62db6623cb30ed32968fc9ee0db1ea5355f9b39a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts)
+- [T3 bounded native task output](https://github.com/pingdotgg/t3code/blob/62db6623cb30ed32968fc9ee0db1ea5355f9b39a/apps/server/src/orchestration-v2/Adapters/ClaudeTaskOutputTail.ts)
 
 T3 is the reference for native execution plus host UI integration. Claude's native `Agent` tool runs subagents and their lifecycle hooks.
