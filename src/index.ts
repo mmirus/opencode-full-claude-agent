@@ -11,15 +11,18 @@ import { backgroundResponse, createBackgroundPublisher } from "./background.js"
 import { NativeTaskStore } from "./tasks.js"
 import { NativeTasks } from "./task-rpc.js"
 import type { RpcRegistration } from "@opencode/plugin/promise/rpc"
+import { ModelCatalog, probeClaudeModels, type ModelProbe } from "./models.js"
 
 const PACKAGE = "opencode-full-claude-agent/runtime"
 
-export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.define({
+export const makePlugin = (lease?: (sessionID: string) => () => void, probe: ModelProbe = probeClaudeModels) => Plugin.define({
   id: "full-claude-agent",
   async setup(ctx) {
     const profiles = parseProfiles(ctx.options, ctx.location.directory)
     // OpenCode 2.2.5 caches model instances across hook disposal; each plugin lifetime needs a fresh key.
     const lifetime = randomUUID()
+    const catalog = new ModelCatalog(ctx.storage, profiles, ctx.location.directory, () => ctx.provider.reload(), probe)
+    await catalog.load()
     const background = createBackgroundPublisher(ctx)
     let taskRPC: RpcRegistration<typeof NativeTasks> | undefined
     const tasks = new NativeTaskStore(ctx.storage, async (sessionID) => { await taskRPC?.events.emit("changed", { sessionID }) })
@@ -29,20 +32,21 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
       output: ({ sessionID, id }) => tasks.output(sessionID, id),
       stop: ({ sessionID, id }) => tasks.stop(sessionID, id),
     })
-    const runtime = new Runtime(ctx.storage, undefined, background.publish, tasks)
+    const runtime = new Runtime(ctx.storage, undefined, background.publish, tasks,
+      (profile, models, account, binding) => catalog.update(profile, models, account, binding), (profile) => catalog.capture(profile))
 
     await ctx.provider.transform((editor) => {
       for (const profile of profiles) {
         const id = Provider.ID.make(profile.id)
         editor.add({
           info: { ...Provider.Info.empty(id), name: profile.name, activation: "enabled", package: `aisdk:${PACKAGE}`, settings: { fullClaudeRuntime: lifetime } },
-          models: profile.models.map((name) => ({
-            ...Model.Info.default(id, Model.ID.make(name)),
-            name,
+          models: catalog.get(profile.id).map((model) => ({
+            ...Model.Info.default(id, Model.ID.make(model.id)),
+            name: model.name,
             limit: { context: 0, output: 0 },
             capabilities: { tools: true, input: ["text", "image", "pdf"], output: ["text"] },
             cost: [],
-            variants: ["low", "medium", "high", "xhigh", "max"].map((effort) => ({ id: Model.VariantID.make(effort), settings: { effort } })),
+            variants: model.efforts.map((effort) => ({ id: Model.VariantID.make(effort), settings: { effort } })),
           })),
         })
       }
@@ -98,10 +102,11 @@ export const makePlugin = (lease?: (sessionID: string) => () => void) => Plugin.
       }
     })().catch((error) => { if (!abort.signal.aborted) console.error("Full Claude Agent checkpoint failed", error) })
     void background.recover().catch((error) => console.error("Full Claude Agent background recovery failed", error))
+    void catalog.refresh()
     return async () => {
       background.stop()
       abort.abort()
-      await runtime.dispose()
+      await Promise.all([catalog.dispose(), runtime.dispose()])
       await tasks.dispose()
       await taskRPC?.dispose()
       await events

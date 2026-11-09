@@ -3,6 +3,7 @@ import type { Plugin } from "@opencode/plugin"
 import { makePlugin } from "../src/index"
 import type { SessionTitle, SessionContext } from "@opencode/plugin/promise/session"
 import { emptyUsage } from "../src/background"
+const probe = async () => ({ models: [] })
 
 test("background delivery controls are removed by message identity without hiding real user text", async () => {
   let context!: (event: SessionContext) => Promise<void>
@@ -28,7 +29,7 @@ test("background delivery controls are removed by message identity without hidin
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))
     } },
   } as unknown as Plugin.Context
-  const dispose = await makePlugin().setup(ctx)
+  const dispose = await makePlugin(undefined, probe).setup(ctx)
   try {
     const event = { sessionID: "ses_test", options: {}, tools: {},
       messages: ["msg_control", "msg_user", "msg_other"].map((id) => ({ id, role: "user", content: [{ type: "text", text }] })),
@@ -64,7 +65,7 @@ test.each([
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))
     } },
   } as unknown as Plugin.Context
-  const dispose = await makePlugin().setup(ctx)
+  const dispose = await makePlugin(undefined, probe).setup(ctx)
   try {
     const event = { sessionID: "ses_title", messages: [{ role: "user", content: [{ type: "text", text: wrapper }] }] } as unknown as SessionTitle
     await title(event)
@@ -73,7 +74,7 @@ test.each([
 })
 
 test("reloaded registrations cannot reuse a cached model from a disposed runtime", async () => {
-  const plugin = makePlugin()
+  const plugin = makePlugin(undefined, probe)
   const providers: Array<{ info: { id: string; settings: Record<string, unknown> } }> = []
   const registration = { dispose: async () => {} }
   const ctx = {

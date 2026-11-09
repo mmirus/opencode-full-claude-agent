@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { realpath } from "node:fs/promises"
-import { query, type Options, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import { query, type AccountInfo, type ModelInfo, type Options, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { LanguageModelV3Prompt, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { makeEnvironment, type Profile } from "./config.js"
 import { assertHistory, digest, historyBoundary, newContent, userFingerprints, type HistoryEntry } from "./prompt.js"
@@ -100,6 +100,8 @@ export class Runtime {
     private factory: QueryFactory = query,
     private backgroundNotice: (sessionID: string, messages: SDKMessage[], owner: BackgroundOwner) => Promise<void> = async () => {},
     private tasks?: NativeTaskStore,
+    private models?: (profile: Profile, models: readonly ModelInfo[], account?: AccountInfo, binding?: string) => Promise<void>,
+    private modelBinding?: (profile: Profile) => Promise<string>,
   ) {}
 
   private async locked<T>(id: string, action: () => Promise<T>): Promise<T> {
@@ -233,6 +235,9 @@ export class Runtime {
 
   private async open(request: RunRequest, entry: Entry, directory: string, launch: string) {
     request.signal.throwIfAborted()
+    const modelBinding = await this.modelBinding?.(request.profile)
+    request.signal.throwIfAborted()
+    if (this.disposed) throw new Error("Full Claude Agent was unloaded")
     const input = new ReadableStream<SDKUserMessage>({ start(controller) { entry.input = controller } })
     const env = makeEnvironment(request.profile)
     const delegation = request.delegation ? createDelegationMcp(() => {
@@ -287,7 +292,9 @@ export class Runtime {
     signal.addEventListener("abort", onAbort, { once: true })
     try {
       signal.throwIfAborted()
-      await timeout(Promise.race([native.initializationResult(), cancelled.promise]), 30_000, "Claude did not initialize within 30 seconds")
+      const init = await timeout(Promise.race([native.initializationResult(), cancelled.promise]), 30_000, "Claude did not initialize within 30 seconds")
+      if (Array.isArray(init.models)) void this.models?.(request.profile, init.models, init.account, modelBinding)
+        .catch((error) => console.error("Full Claude Agent model catalog update failed", error))
     } catch (error) {
       native.close()
       await entry.pump

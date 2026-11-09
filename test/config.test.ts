@@ -15,14 +15,13 @@ afterEach(() => {
 });
 
 describe("parseProfiles", () => {
-  test("defaults to stable model aliases, the real home, and the installed CLI", () => {
+  test("defaults to model discovery, the real home, and the installed CLI", () => {
     expect(parseProfiles({}, directory, {})).toEqual([{
       id: "full-claude-agent",
       name: "Full Claude Agent",
       configDir: join(homedir(), ".claude"),
       binaryPath: "claude",
       plugins: [],
-      models: ["sonnet", "opus", "haiku"],
     }]);
   });
 
@@ -49,9 +48,18 @@ describe("parseProfiles", () => {
       { id: "full-claude-agent-personal", name: "Full Claude Agent (personal)" },
       { id: "full-claude-agent-alternate", name: "Alternate" },
     ]);
-    profiles[0]!.models.push("opus");
+    profiles[0]!.models!.push("opus");
     expect(input.profiles.personal.models).toEqual(["sonnet"]);
-    expect(profiles[1]!.models).toEqual(["sonnet", "opus", "haiku"]);
+    expect(profiles[1]!.models).toBeUndefined();
+  });
+
+  test("preserves explicit model IDs and order without enabling discovery for that profile", () => {
+    const models = ["claude-fable-5", "claude-sonnet-5", "custom-provider/model"];
+    const profile = parseProfiles({ models }, directory, {})[0]!;
+    expect(profile.models).toEqual(models);
+    expect(profile.models).not.toBe(models);
+    models.push("opus");
+    expect(profile.models).toEqual(["claude-fable-5", "claude-sonnet-5", "custom-provider/model"]);
   });
 
   test("validates plugin directories and returns absolute paths", () => {
@@ -74,7 +82,8 @@ describe("parseProfiles", () => {
     { configDir: "" }, { configDir: " " }, { configDir: 1 }, { configDir: undefined },
     { binaryPath: "" }, { binaryPath: false }, { binaryPath: "bad\0path" },
     { plugins: "plugin" }, { plugins: [1] }, { plugins: [""] },
-    { models: [] }, { models: "sonnet" }, { models: [""] }, { models: [null] },
+    { models: [] }, { models: "sonnet" }, { models: [""] }, { models: [" "] }, { models: [null] },
+    { models: undefined }, { models: ["sonnet\0secret"] },
     { env: null }, { env: [] }, { env: "bad" }, { env: undefined },
     { env: { "": "value" } }, { env: { " ": "value" } },
     { env: { "BAD=NAME": "value" } }, { env: { "BAD\0NAME": "value" } },

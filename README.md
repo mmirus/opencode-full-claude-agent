@@ -32,7 +32,7 @@ Add the plugin to your global `~/.config/opencode/opencode.jsonc` or a project's
 }
 ```
 
-Start a new session and select **Full Claude Agent** in the model picker. Existing conversations from other providers cannot be imported. The default model IDs are `sonnet`, `opus`, and `haiku`, which Claude Code resolves. For example, `full-claude-agent/sonnet`.
+Start a new session and select **Full Claude Agent** in the model picker. Existing conversations from other providers cannot be imported. The provider discovers Claude's model catalog for the selected configuration, including versioned display names, older model choices, and newly available families. Alias IDs such as `full-claude-agent/opus` remain usable; Claude resolves their versions.
 
 ## Multiple accounts in one server
 
@@ -66,7 +66,7 @@ Profile options:
 | `configDir` | Claude settings and authentication directory. Defaults to inherited `CLAUDE_CONFIG_DIR`, then `~/.claude`. |
 | `binaryPath` | Installed Claude executable; defaults to `claude`. |
 | `plugins` | Additional local plugin directories containing `.claude-plugin/plugin.json`. Defaults to none. |
-| `models` | Claude model IDs or CLI aliases to expose. Defaults to `sonnet`, `opus`, and `haiku`. |
+| `models` | Optional list of Claude model IDs or CLI aliases to expose, in order. Omit it to discover the catalog automatically. |
 | `env` | Per-process environment overrides. A `null` value removes an inherited variable. |
 | `name` | Display name, available inside named profiles. |
 
@@ -77,6 +77,10 @@ Profile options:
 `configDir` controls `CLAUDE_CONFIG_DIR` even if `env` supplies another value. Claude host-session variables inherited from a parent Claude process are removed after applying `env`, so the child does not join the parent's session.
 
 Inherited API credentials can override Claude subscription authentication. If the server has API credentials but a profile should use its Claude login, remove the relevant inherited variables through that profile's `env`, for example `{"ANTHROPIC_API_KEY": null, "ANTHROPIC_AUTH_TOKEN": null, "CLAUDE_CODE_OAUTH_TOKEN": null}`. Endpoint and backend-selection variables also remain inherited unless explicitly overridden.
+
+Model catalogs are cached separately for each profile and configuration binding, then refreshed through a disposable Claude initialization without submitting a model prompt. The startup probe uses isolated settings; user/project `modelPicker` overrides and other settings-dependent catalog differences are reflected when a normal native Claude session initializes. Discovery does not reinitialize an active conversation.
+
+An explicit `models` list limits the picker to those IDs; matching discovered names and effort levels are retained. Unknown explicit IDs remain selectable without guessed effort options. If discovery fails, the provider keeps a matching cached catalog, or falls back to `sonnet`, `opus`, and `haiku` without inferred effort variants. Discovery failures are recorded in the OpenCode server log.
 
 ## Native plugins and commands
 
@@ -180,6 +184,7 @@ FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/checkp
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/background-permission-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/reload-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/native-task-smoke.ts
+FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/model-discovery-smoke.ts
 FULL_CLAUDE_LIVE=1 bun run test:permission
 FULL_CLAUDE_LIVE=1 bun run test:diff
 bun run scripts/probe-accounts.ts "$HOME/.claude" "$HOME/.claude-secondary"
@@ -212,7 +217,7 @@ bun run scripts/probe-accounts.ts --show-identity "$HOME/.claude" "$HOME/.claude
 
 Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other-config-dir> ...]`. Missing SDK identity fields are omitted; the probe does not infer them. Neither mode prints credentials or token values. The probe still loads user settings and can start configured integrations. Configuration paths, identity hashes, opted-in email/organization output, and retained integration-test diagnostics should be treated as private; do not commit or publish them.
 
-### Verified through 2026-11-05
+### Verified through 2026-11-09
 
 - [x] TypeScript check and offline test suite.
 - [x] Native fixture hooks, plugin discovery, transcript access, and resume through the installed Claude CLI.
@@ -230,6 +235,7 @@ Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other
 - [x] Native background permission approval and rejection, native hooks, and automatic delivery of the parent's completed report without another user prompt.
 - [x] Native task visibility after foreground completion, captured-output reading, and SDK Stop with a confirmed stopped outcome and no command replay.
 - [x] Stock terminal UI loads the companion task viewer; narrow-terminal rendering has been exercised.
+- [x] Initialization-only model discovery matches Claude's IDs, names, and effort options, preserves explicit model lists, and survives an isolated server restart (OpenCode 2.2.6, Claude Code 2.1.319).
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 

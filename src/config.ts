@@ -8,7 +8,7 @@ export interface Profile {
   configDir: string;
   binaryPath?: string;
   plugins: string[];
-  models: string[];
+  models?: string[];
   env?: Record<string, string | null>;
 }
 
@@ -98,8 +98,8 @@ export function parseProfiles(
       }
       return directory;
     });
-    const models = Object.hasOwn(settings, "models") ? strings(settings.models, `${label}.models`) : ["sonnet", "opus", "haiku"];
-    if (models.length === 0) throw new Error(`${label}.models must not be empty`);
+    const models = Object.hasOwn(settings, "models") ? strings(settings.models, `${label}.models`) : undefined;
+    if (models?.length === 0) throw new Error(`${label}.models must not be empty`);
     let profileEnvironment: Record<string, string | null> | undefined;
     if (Object.hasOwn(settings, "env")) {
       const overrides = object(settings.env, `${label}.env`);
@@ -119,7 +119,7 @@ export function parseProfiles(
       configDir,
       binaryPath,
       plugins: resolvedPlugins,
-      models,
+      ...(models === undefined ? {} : { models }),
       ...(profileEnvironment === undefined ? {} : { env: profileEnvironment }),
     };
   };
