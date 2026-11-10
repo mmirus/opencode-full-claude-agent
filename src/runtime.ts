@@ -39,6 +39,7 @@ interface RecordState {
   version: 2
   binding: string
   nativeID: string
+  nativeContext?: { providerID: string; configDir: string; directory: string }
   users: string[]
   boundary: string[]
   outcome: "ready" | "pending" | "settled" | "uncertain"
@@ -146,6 +147,7 @@ export class Runtime {
       if (entry.record.binding !== binding) {
         throw new Error("This session belongs to another Claude configuration or working directory. Start a new session for the selected configuration.")
       }
+      const nativeContext = { providerID: request.profile.id, configDir, directory }
       if (entry.record.outcome === "uncertain") throw new Error("The previous Claude turn has an uncertain outcome. Start a new session.")
       if (entry.record.outcome === "settled") await this.reconcile(request.sessionID, entry, request.history)
       assertHistory(request.history, entry.record.boundary)
@@ -165,7 +167,7 @@ export class Runtime {
       const usage = responses.reduce((total, response) => addUsage(total, response.usage), emptyUsage())
       if (this.disposed) throw new Error("Full Claude Agent was unloaded")
       if (responses.length) {
-        const settled: RecordState = { ...entry.record, delivery: responses, outcome: "settled", checkpoint: this.prepared(request) }
+        const settled: RecordState = { ...entry.record, nativeContext, delivery: responses, outcome: "settled", checkpoint: this.prepared(request) }
         await this.storage.set(this.key(request.sessionID), settled)
         entry.record = settled
         if (this.disposed) throw new Error("Full Claude Agent was unloaded")
@@ -206,7 +208,7 @@ export class Runtime {
         if (turn.unloaded) throw turn.unloaded
         request.signal.throwIfAborted()
         if (entry.failure || !entry.native) throw entry.failure ?? new Error("Claude stopped during initialization")
-        entry.record = { ...entry.record, users: userFingerprints(request.prompt), pendingUUID: turn.uuid, outcome: "pending",
+        entry.record = { ...entry.record, nativeContext, users: userFingerprints(request.prompt), pendingUUID: turn.uuid, outcome: "pending",
           checkpoint: { ...this.prepared(request), uuid: turn.uuid } }
         await this.save(request.sessionID, entry)
         if (turn.unloaded) throw turn.unloaded

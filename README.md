@@ -236,6 +236,16 @@ bun run scripts/probe-accounts.ts --show-identity "$HOME/.claude" "$HOME/.claude
 
 Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other-config-dir> ...]`. Missing SDK identity fields are omitted; the probe does not infer them. Neither mode prints credentials or token values. The probe still loads user settings and can start configured integrations. Configuration paths, identity hashes, opted-in email/organization output, and retained integration-test diagnostics should be treated as private; do not commit or publish them.
 
+### Inspect native sessions during development
+
+```sh
+bun run scripts/inspect-native-session.ts <opencode-session-id>
+```
+
+The helper reads the local OpenCode database in read-only mode and locates the native transcript under the recorded profile's configured `projects` directory, including a symlinked projects root. It works without a running server and makes no model calls. Default output contains identifiers, paths, and saved state; `--tail 20` adds recent raw transcript records. Use `--database <path>` for an isolated test database.
+
+Older saved records without native context require an explicit `--config-dir <path>`. The helper does not search other accounts automatically. Keep transcript output in private diagnostic artifacts rather than commits.
+
 ### Verified through 2026-11-10
 
 - [x] TypeScript check and offline test suite.
@@ -262,6 +272,7 @@ Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other
 - [x] Native background Bash retains its observed input, task ID, captured output, and working Stop RPC. Foreground cancellation records an aborted tool rather than false completion; command completion markers remain absent.
 - [x] A native follow-up after foreground cancellation and server restart completes without replaying either command.
 - [x] Native thinking summaries persist once and expand in the stock TUI. Display-only requests preserve native thinking-disabled and effort settings, including native model requirements, on Claude Code 2.1.322.
+- [x] Read-only native-session inspection resolves V2 session records and symlinked transcript storage, omits transcript bodies by default, and preserves database and transcript bytes.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import type { LanguageModelV3Prompt, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import type { SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Runtime, type NativeQuery, type QueryFactory, type RunRequest, type Storage } from "../src/runtime"
@@ -162,6 +162,30 @@ function harness(storage = new MemoryStorage(), initialize = true, onNotice?: (m
 }
 
 describe("Runtime", () => {
+  test("persists canonical diagnostic context without profile environment values", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claude-native-context-"))
+    cleanups.push(async () => { rmSync(root, { recursive: true, force: true }) })
+    const configDir = join(root, "profile")
+    const directory = join(root, "project")
+    mkdirSync(configDir)
+    mkdirSync(directory)
+    symlinkSync(configDir, join(root, "profile-link"))
+    symlinkSync(directory, join(root, "project-link"))
+    const h = harness()
+    const run = h.run({ directory: join(root, "project-link"),
+      profile: { ...profile(), configDir: join(root, "profile-link"), env: { PRIVATE_DIAGNOSTIC_VALUE: "not-for-storage" } } })
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    const expected = { providerID: "one", configDir: realpathSync(configDir), directory: realpathSync(directory) }
+    expect(h.storage.record().nativeContext).toEqual(expected)
+    expect(h.storage.record().nativeID).toBe(q.args.options.sessionId)
+    expect(JSON.stringify(h.storage.record())).not.toContain("not-for-storage")
+    await q.send(result(input.uuid!))
+    await run.done
+    await h.runtime.checkpoint("session", async () => history)
+    expect(h.storage.record().nativeContext).toEqual(expected)
+  }, 2000)
+
   test("buffers native command observations with their result and uses final SDK output", async () => {
     const h = harness()
     const run = h.run()
@@ -298,6 +322,9 @@ describe("Runtime", () => {
 
   test("a fresh runtime delivers a cached report without opening a query", async () => {
     const { h, response, wake } = await completedSession()
+    const saved = structuredClone(h.storage.record())
+    delete saved.nativeContext
+    await h.storage.set("session/session", saved)
     const restarted = harness(h.storage)
     const run = restarted.run({ history: [...history, wake] })
     await run.done
@@ -309,6 +336,7 @@ describe("Runtime", () => {
     ])
     expect(run.parts.filter((part) => part.type === "finish")).toEqual([expect.objectContaining({ usage: response.usage })])
     expect(h.storage.record().delivery).toEqual([response])
+    expect(h.storage.record().nativeContext).toEqual({ providerID: "one", configDir: profile().configDir, directory: realpathSync(process.cwd()) })
   }, 2000)
 
   test.each([429, 529])("query-wide rejection metadata does not invent request ownership for HTTP %s", async (status) => {
@@ -1014,6 +1042,8 @@ describe("Runtime", () => {
     await q.send(result((await q.input.take()).uuid!))
     await run.done
     const settled = structuredClone(first.storage.record())
+    delete settled.nativeContext
+    await first.storage.set("session/session", settled)
     await first.runtime.dispose()
     const second = harness(first.storage)
     const resumed = second.run({ history, prompt: [user("first"), user("second")] })
@@ -1021,6 +1051,7 @@ describe("Runtime", () => {
     const next = await nextQuery.input.take()
     expect(nextQuery.args.options.resume).toBe(settled.nativeID)
     expect(next.message.content).toEqual([{ type: "text", text: "second" }])
+    expect(first.storage.record().nativeContext).toEqual({ providerID: "one", configDir: profile().configDir, directory: realpathSync(process.cwd()) })
     const ready = first.storage.writes.find((write) => write.value.outcome === "ready")!.value
     expect(ready.users).toEqual(settled.users)
     expect(ready.nativeID).toBe(settled.nativeID)
@@ -1039,6 +1070,7 @@ describe("Runtime", () => {
     if (outcome === "ready") await first.runtime.checkpoint("session", async () => history)
     const saved = structuredClone(first.storage.record())
     saved.version = 1
+    delete saved.nativeContext
     delete saved.checkpoint
     await first.storage.set("session/session", saved)
     await first.runtime.dispose()
@@ -1054,6 +1086,7 @@ describe("Runtime", () => {
     const next = await nextQuery.input.take()
     expect(nextQuery.args.options.resume).toBe(saved.nativeID)
     expect(first.storage.record().version).toBe(2)
+    expect(first.storage.record().nativeContext).toEqual({ providerID: "one", configDir: profile().configDir, directory: realpathSync(process.cwd()) })
     expect(next.message.content).toEqual([{ type: "text", text: "second" }])
     await nextQuery.send(result(next.uuid!))
     await resumed.done
@@ -1198,6 +1231,7 @@ describe("Runtime", () => {
     await q.send(result((await q.input.take()).uuid!))
     await first.done
     await h.runtime.checkpoint("session", async () => history)
+    const before = structuredClone(h.storage.record())
     const changed: Partial<RunRequest> = { prompt: [user("first"), user("second")] }
     if (field === "directory") {
       changed.directory = mkdtempSync(join(tmpdir(), "claude-runtime-binding-"))
@@ -1208,6 +1242,7 @@ describe("Runtime", () => {
     await expect(h.run(changed).done).rejects.toThrow("another Claude configuration or working directory")
     expect(h.queries).toHaveLength(1)
     expect(q.inputs).toHaveLength(1)
+    expect(h.storage.record()).toEqual(before)
   }, 2000)
 
   test("reuses one native query for foreground prompts and sends no historical replay", async () => {

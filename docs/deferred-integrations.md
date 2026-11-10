@@ -14,7 +14,6 @@ The [2.2.7 provider-result path](https://github.com/anomalyco/opencode/blob/v2.2
 
 ## Native runtime features
 
-- Native transcript IDs could support diagnostics or transcript navigation. Keep API message IDs, transcript UUIDs, host message IDs, and submitted-user UUIDs distinct.
 - Live model/effort changes and process handover require native-turn and background-task ownership rules. Stock Claude Agent's parked-tool and idle-retirement machinery assumes OpenCode-owned tools and cannot be copied unchanged.
 - Context windows and API pricing require account-sensitive discovery. Publishing finite context limits can enable host compaction, which Full Claude rejects; subscription and custom-gateway usage must not receive invented catalog prices.
 - Stock fallback-disabling environment flags need a concrete native reproduction before adoption. Preserve the native behavior the provider exists to expose.
