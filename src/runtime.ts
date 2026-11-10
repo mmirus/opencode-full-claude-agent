@@ -267,6 +267,8 @@ export class Runtime {
       persistSession: true,
       model: request.model,
       effort: request.effort,
+      // The SDK's typed thinking option also selects the native thinking mode.
+      extraArgs: { "thinking-display": "summarized" },
       tools: { type: "preset", preset: "claude_code" },
       settingSources: ["user", "project", "local"],
       settings: { attribution: { pr: "*Posted via OpenCode*" } },

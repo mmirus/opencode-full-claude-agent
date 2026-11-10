@@ -106,6 +106,10 @@ The card separates command observations from the final SDK tool output. When the
 
 Question and permission mapping have offline test coverage. Live terminal testing verifies that a question appears in an already-open client and that selecting an option returns the answer to Claude. Terminal permission testing verifies both rejection and one-time approval of a native write. Graphical-client question and permission dialogs remain unverified.
 
+## Thinking summaries
+
+Thinking summaries are requested by default and streamed into OpenCode's reasoning blocks when Claude supplies them. The display setting does not select a thinking mode, token budget, or effort level; native thinking settings and the selected model/effort still apply. Models that require thinking retain their native always-on behavior.
+
 ## Native file-diff data
 
 Successful native `Edit` and `Write` calls report their authoritative file diffs as provider-native metadata. The plugin does not execute the edit again, read the filesystem to reconstruct its result, or insert diff text into the assistant's answer.
@@ -193,6 +197,7 @@ FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/checkp
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/background-permission-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/bash-presentation-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/bash-provenance-lifecycle-smoke.ts
+FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/thinking-summary-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/reload-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/native-task-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/model-discovery-smoke.ts
@@ -256,6 +261,7 @@ Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other
 - [x] Stock OpenCode 2.2.7 TUI labels the requested command, hook-observed native input, and final native output separately. Denied commands remain errors with an explicit missing observation; Write retains native presentation.
 - [x] Native background Bash retains its observed input, task ID, captured output, and working Stop RPC. Foreground cancellation records an aborted tool rather than false completion; command completion markers remain absent.
 - [x] A native follow-up after foreground cancellation and server restart completes without replaying either command.
+- [x] Native thinking summaries persist once and expand in the stock TUI. Display-only requests preserve native thinking-disabled and effort settings, including native model requirements, on Claude Code 2.1.322.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 
