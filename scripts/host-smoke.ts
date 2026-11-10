@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createTempDirectory } from "./support/temp.js";
 
 if (process.env.FULL_CLAUDE_LIVE !== "1") {
-  console.log("Skipped: set FULL_CLAUDE_LIVE=1 to run two paid Haiku turns through installed OpenCode 2.2.5.");
+  console.log("Skipped: set FULL_CLAUDE_LIVE=1 to run two paid Haiku turns through installed OpenCode 2.2.7.");
   process.exit(0);
 }
 
@@ -138,7 +138,7 @@ function validate(label: string, output: string, sessionID?: string): string {
 
 try {
   const version = (await command("version", ["--version"])).trim();
-   assert.match(version, /^(?:opencode v)?2\.2\.5$/, "This smoke test targets installed OpenCode 2.2.5");
+   assert.match(version, /^(?:opencode v)?2\.2\.7$/, "This smoke test targets installed OpenCode 2.2.7");
   const flags = ["--standalone", "run", "--model", "full-claude-agent/haiku", "--format", "json"];
   const first = await command("initial", [...flags, `Do not use tools. Remember marker ${marker}. Reply exactly ${marker}, with no other text.`]);
   const sessionID = validate("initial", first);

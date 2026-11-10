@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto"
 import { realpath } from "node:fs/promises"
-import { query, type AccountInfo, type ModelInfo, type Options, type Query, type SDKMessage, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
+import { query, type AccountInfo, type ModelInfo, type Options, type Query, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { LanguageModelV3Prompt, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { makeEnvironment, type Profile } from "./config.js"
 import { assertHistory, digest, historyBoundary, newContent, userFingerprints, type HistoryEntry } from "./prompt.js"
 import { createStreamConverter } from "./stream.js"
 import { createDelegationMcp, DELEGATION_INSTRUCTIONS, DELEGATION_SERVER, type ActiveDelegation } from "./delegation-mcp.js"
-import { addUsage, backgroundParts, backgroundResponse, emptyUsage, type BackgroundOwner, type BackgroundResponse } from "./background.js"
+import { addUsage, backgroundError, backgroundParts, backgroundResponse, emptyUsage, type BackgroundOwner, type BackgroundResponse, type BackgroundResult } from "./background.js"
+import { classifyNativeResult, createNativeStatus } from "./native-status.js"
+import { createBashProvenance } from "./bash-provenance.js"
 import type { NativeTaskStore } from "./tasks.js"
 
 export interface Storage {
@@ -78,7 +80,8 @@ interface Entry {
   noticeRetry?: ReturnType<typeof setTimeout>
   noticeFailures?: number
   autonomousReady?: boolean
-  cycle?: { autonomous: boolean; uuids?: string[]; frames: Array<{ message: SDKMessage; beforeAbort: boolean }> }
+  rateLimit?: SDKRateLimitInfo
+  cycle?: { autonomous: boolean; uuids?: string[]; status: ReturnType<typeof createNativeStatus>; frames: Array<{ message: SDKMessage; beforeAbort: boolean }> }
 }
 
 const timeout = async <T>(promise: Promise<T>, ms: number, message: string): Promise<T> => {
@@ -176,7 +179,11 @@ export class Runtime {
       if (users.length === entry.record.users.length && (responses.length || request.history.some((message) => backgroundResponse(message)))) {
         request.signal.throwIfAborted()
         if (this.disposed) throw new Error("Full Claude Agent was unloaded")
-        request.emit({ type: "finish", usage, finishReason: { unified: "stop", raw: "background_delivery" } })
+        const error = responses.map(backgroundError).find((error) => error !== undefined)
+        if (error) request.emit({ type: "error", error })
+        const rateLimit = responses.findLast((response) => response.rateLimit)?.rateLimit
+        request.emit({ type: "finish", usage, finishReason: { unified: error ? "error" : "stop", raw: "background_delivery" },
+          ...(rateLimit ? { providerMetadata: { [request.profile.id]: { rateLimit: JSON.parse(JSON.stringify(rateLimit)) } } } : {}) })
         return
       }
       const content = newContent(request.prompt, entry.record.users)
@@ -249,8 +256,9 @@ export class Runtime {
     const permissions = new AbortController()
     const interactions = request.interactions(permissions.signal)
     entry.permissions = permissions
+    const provenance = createBashProvenance(entry.record.nativeID)
     let taskConnection: ReturnType<NativeTaskStore["connect"]> | undefined
-    const cleanup = () => { taskConnection?.close(); permissions.abort(); interactions.dispose?.() }
+    const cleanup = () => { provenance.close(); taskConnection?.close(); permissions.abort(); interactions.dispose?.() }
     const options: Options = {
       cwd: directory,
       env,
@@ -262,6 +270,7 @@ export class Runtime {
       tools: { type: "preset", preset: "claude_code" },
       settingSources: ["user", "project", "local"],
       settings: { attribution: { pr: "*Posted via OpenCode*" } },
+      hooks: provenance.hooks,
       plugins: request.profile.plugins.map((path) => ({ type: "local", path })),
       ...(delegation ? { mcpServers: { [DELEGATION_SERVER]: delegation } } : {}),
       systemPrompt: { type: "preset", preset: "claude_code", append: [
@@ -281,11 +290,15 @@ export class Runtime {
     try { native = this.factory({ prompt: input, options }) }
     catch (error) { cleanup(); throw error }
     entry.native = native
+    entry.rateLimit = undefined
     taskConnection = this.tasks?.connect({ sessionID: request.sessionID, providerID: request.profile.id, nativeID: entry.record.nativeID },
       native.stopTask ? (taskID) => native.stopTask!(taskID) : undefined)
     entry.launch = launch
     entry.failure = undefined
-    entry.pump = this.read(request.sessionID, entry, native, cleanup, (message) => taskConnection?.observe(message))
+    entry.pump = this.read(request.sessionID, entry, native, cleanup, (message) => {
+      taskConnection?.observe(message)
+      return provenance.observe(message)
+    })
     const cancelled = Promise.withResolvers<never>()
     const signal = AbortSignal.any([request.signal, entry.turn!.operations.signal])
     const onAbort = () => cancelled.reject(signal.reason)
@@ -303,9 +316,9 @@ export class Runtime {
     } finally { signal.removeEventListener("abort", onAbort) }
   }
 
-  private async read(sessionID: string, entry: Entry, native: NativeQuery, cleanup: () => void, observe: (message: SDKMessage) => void) {
+  private async read(sessionID: string, entry: Entry, native: NativeQuery, cleanup: () => void, observe: (message: SDKMessage) => SDKMessage) {
     const emit = (turn: Turn, message: SDKMessage, beforeAbort = false) => {
-      if (!turn.aborted || (turn.unloaded && beforeAbort)) for (const part of turn.converter.push(message)) turn.request.emit(part)
+      if (!turn.aborted || (turn.unloaded && beforeAbort)) for (const part of turn.converter.push(message, entry.rateLimit)) turn.request.emit(part)
       else if (turn.unloaded && message.type === "user") {
         for (const part of turn.converter.push(message)) if (part.type === "tool-result") turn.request.emit(part)
       }
@@ -314,8 +327,12 @@ export class Runtime {
       for (const frame of entry.cycle?.frames.splice(0) ?? []) emit(turn, frame.message, frame.beforeAbort)
     }
     try {
-      for await (const message of native) {
-        observe(message)
+      for await (const frame of native) {
+        const message = observe(frame)
+        if (message.type === "rate_limit_event") {
+          entry.rateLimit = structuredClone(message.rate_limit_info)
+          continue
+        }
         if (message.type === "system" && message.subtype === "init" && message.plugin_errors?.length) {
           throw new Error(`Claude plugin loading failed: ${message.plugin_errors.map((error) => `${error.plugin}: ${error.message}`).join("; ")}`)
         }
@@ -326,11 +343,12 @@ export class Runtime {
             const root = message.parent_tool_use_id === null
             if (root && message.type !== "user") {
               if (!entry.cycle) {
-                entry.cycle = { frames: [], autonomous: entry.autonomousReady === true || !turn?.submitted }
+                entry.cycle = { frames: [], status: createNativeStatus(), autonomous: entry.autonomousReady === true || !turn?.submitted }
                 entry.autonomousReady = false
               }
               const uuids = message.user_message_uuids?.length ? message.user_message_uuids : message.user_message_uuid ? [message.user_message_uuid] : undefined
               if (uuids) entry.cycle.uuids = uuids
+              entry.cycle.status.observe(message)
             }
             if (turn?.submitted && entry.record.outcome === "pending" && entry.cycle?.uuids?.includes(turn.uuid)) {
               flush(turn)
@@ -345,13 +363,16 @@ export class Runtime {
           throw new Error("Claude returned a result without a prompt UUID; this CLI cannot safely correlate concurrent native activity.")
         }
         if (!turn?.submitted || entry.record.outcome !== "pending" || !attributed) {
-          if (message.type === "result" && message.is_error && turn && !turn.submitted) {
-            throw new Error(`Claude startup failed: ${message.subtype}`)
+          const diagnostics = entry.cycle?.status.snapshot() ?? {}
+          const outcome = classifyNativeResult(message, diagnostics, entry.rateLimit)
+          if (outcome.error && turn && !turn.submitted) {
+            throw new Error(`Claude startup failed: ${outcome.error.message}`, { cause: outcome.error })
           }
           entry.cycle = undefined
           entry.autonomousReady = false
           if (entry.record.users.length) {
-            entry.notices.push(message)
+            const notice: BackgroundResult = { ...message, fullClaudeStatus: { diagnostics, rateLimit: entry.rateLimit } }
+            entry.notices.push(notice)
             this.notify(sessionID, entry)
           }
           continue

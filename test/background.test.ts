@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { Plugin } from "@opencode/plugin"
-import { createBackgroundPublisher } from "../src/background"
+import { createBackgroundPublisher, type BackgroundResult } from "../src/background"
 
 const owner = { providerID: "one", nativeID: "native-session", binding: "configuration" }
 const completed = (uuid = "result-one", text = "Complete answer") => ({
@@ -179,7 +179,50 @@ describe("background publisher", () => {
     const h = harness()
     await h.publisher.publish("session", [{ ...completed(), subtype: "error_during_execution", is_error: true,
       errors: ["Tool crashed", "Retry exhausted"] } as SDKMessage], owner)
-    expect(h.wakes[0].metadata.fullClaudeAgentBackground.text).toBe("Claude background activity failed: Tool crashed; Retry exhausted")
+    expect(h.wakes[0].metadata.fullClaudeAgentBackground.text).toBe("Claude background activity failed: Tool crashed\nRetry exhausted")
+  })
+
+  test.each([429, 529])("journals HTTP %s failures with diagnostics and quota metadata through recovery", async (status) => {
+    const h = harness()
+    const rateLimit = { status: "rejected" as const, rateLimitType: "five_hour" as const, resetsAt: 2_000_000_000 }
+    const message = { ...completed(), api_error_status: status, result: "",
+      fullClaudeStatus: { diagnostics: { code: "rate_limit", detail: "Native quota detail" }, rateLimit },
+    } as BackgroundResult
+    h.session.synthetic = async () => { throw new Error("inbox unavailable") }
+    await expect(h.publisher.publish("session", [message], owner)).rejects.toThrow("inbox unavailable")
+    const pending = [...h.values.values()][0]
+    expect(pending.response.text).toContain(status === 429 ? "Native quota detail" : "overloaded")
+    expect(pending.response.text).toStartWith("Claude background activity failed:")
+    expect(pending.response.error.statusCode).toBe(status)
+    expect(typeof pending.response.error.message).toBe("string")
+    expect(pending.response).toMatchObject({ ...owner, rateLimit })
+    expect(pending.sent).toBe(false)
+    h.session.synthetic = async (wake) => { h.wakes.push(structuredClone(wake)) }
+    await createBackgroundPublisher(h.context).recover()
+    expect(h.wakes).toHaveLength(1)
+    expect(h.wakes[0].metadata.fullClaudeAgentBackground).toEqual(pending.response)
+    expect([...h.values.values()]).toEqual([{ sent: true }])
+  })
+
+  test("successful background results retain quota metadata without retaining transient errors", async () => {
+    const h = harness()
+    const rateLimit = { status: "rejected" as const, rateLimitType: "seven_day" as const }
+    await h.publisher.publish("session", [{ ...completed(), fullClaudeStatus: {
+      diagnostics: { code: "rate_limit", detail: "Transient rejection" }, rateLimit,
+    } } as BackgroundResult], owner)
+    expect(h.wakes[0].metadata.fullClaudeAgentBackground).toMatchObject({ text: "Complete answer", rateLimit })
+    expect(h.wakes[0].metadata.fullClaudeAgentBackground.error).toBeUndefined()
+  })
+
+  test("blank SDK errors use the captured root diagnostic in the recovered report", async () => {
+    const h = harness()
+    const message = { ...completed(), subtype: "error_during_execution", is_error: true, errors: ["", "  "],
+      fullClaudeStatus: { diagnostics: { code: "unknown", detail: "Native terminal detail" } },
+    } as BackgroundResult
+    await h.publisher.publish("session", [message], owner)
+    expect(h.wakes[0].metadata.fullClaudeAgentBackground).toMatchObject({
+      text: "Claude background activity failed: Native terminal detail", error: { message: "Native terminal detail" },
+    })
   })
 
   test("does not admit a wake when persisting the answer fails", async () => {

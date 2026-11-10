@@ -100,4 +100,5 @@ test("reloaded registrations cannot reuse a cached model from a disposed runtime
   expect(providers.map((provider) => provider.info.id)).toEqual(["full-claude-agent", "full-claude-agent"])
   expect(providers[0]!.info.settings.fullClaudeRuntime).toBeString()
   expect(providers[0]!.info.settings.fullClaudeRuntime).not.toBe(providers[1]!.info.settings.fullClaudeRuntime)
+  expect(providers.map((provider) => provider.info.settings.cache)).toEqual([{ warming: false }, { warming: false }])
 })

@@ -241,7 +241,7 @@ console.log(`Profile config directories: first=${firstConfig}; second=${secondCo
 
 try {
   const version = (await command("version", ["--version"])).trim();
-  assert.match(version, /^(?:opencode v)?2\.2\.5$/, "This smoke test targets installed OpenCode 2.2.5");
+  assert.match(version, /^(?:opencode v)?2\.2\.7$/, "This smoke test targets installed OpenCode 2.2.7");
   const port = await ephemeralPort();
   const url = `http://127.0.0.1:${port}`;
   const server = launch("server", ["serve", "--hostname", "127.0.0.1", "--port", String(port)]);

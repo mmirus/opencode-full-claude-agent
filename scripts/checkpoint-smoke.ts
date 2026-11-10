@@ -85,7 +85,7 @@ try {
   save("version.json", { status: versionResult.status, stdout: versionResult.stdout, stderr: versionResult.stderr })
   assert.equal(versionResult.status, 0, "opencode --version failed")
   const version = versionResult.stdout.trim()
-  assert.match(version, /^(?:opencode v)?2\.2\.5$/, "This repro targets installed stock OpenCode 2.2.5")
+  assert.match(version, /^(?:opencode v)?2\.2\.7$/, "This repro targets installed stock OpenCode 2.2.7")
   const port = await new Promise<number>((done, reject) => {
     const socket = createServer()
     socket.once("error", reject)

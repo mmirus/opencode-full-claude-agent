@@ -80,7 +80,9 @@ class FakeQuery implements NativeQuery {
   }
   close() { this.closed++; this.output.end(); this.didClose.resolve() }
   send(message: unknown) {
-    const frame = message as Record<string, unknown>
+    let frame = message as Record<string, unknown>
+    if (!("session_id" in frame)) frame = { ...frame, session_id: this.args.options.sessionId ?? this.args.options.resume }
+    message = frame
     if ((frame.type === "assistant" || frame.type === "stream_event") && frame.parent_tool_use_id === null &&
       !("user_message_uuid" in frame) && this.inputs.length) {
       message = { ...frame, user_message_uuid: this.inputs.at(-1)!.uuid }
@@ -111,6 +113,19 @@ const result = (uuid: string) => ({ type: "result", subtype: "success", user_mes
   usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } })
 const assistant = (id: string, text: string) => ({ type: "assistant", parent_tool_use_id: null,
   message: { id, content: [{ type: "text", text }] } })
+
+const bashCall = (id: string, parent: string | null = null) => ({ type: "assistant", parent_tool_use_id: parent,
+  message: { id: `assistant-${id}`, content: [{ type: "tool_use", id, name: "Bash", input: { command: "printf requested" } }] } })
+const bashResult = (id: string, parent: string | null = null) => ({ type: "user", parent_tool_use_id: parent,
+  message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "Final SDK output" }] } })
+
+async function observeBash(query: FakeQuery, nativeID: string, id: string, command: string) {
+  const callback = query.args.options.hooks?.PostToolUse?.[0]?.hooks[0]
+  if (!callback) throw new Error("Missing read-only Bash observer")
+  expect(await callback({ hook_event_name: "PostToolUse", session_id: nativeID, transcript_path: "/native/transcript",
+    cwd: process.cwd(), tool_name: "Bash", tool_use_id: id, tool_input: { command },
+    tool_response: "Hook response before other native post-hooks" }, id, { signal: new AbortController().signal })).toEqual({})
+}
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -147,6 +162,124 @@ function harness(storage = new MemoryStorage(), initialize = true, onNotice?: (m
 }
 
 describe("Runtime", () => {
+  test("buffers native command observations with their result and uses final SDK output", async () => {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    await q.send({ ...bashCall("buffered"), user_message_uuid: undefined })
+    await observeBash(q, h.storage.record().nativeID, "buffered", "printf observed")
+    await q.send(bashResult("buffered"))
+    expect(run.parts).toEqual([])
+    await observeBash(q, h.storage.record().nativeID, "buffered", "printf stale")
+    await q.send(result(input.uuid!))
+    await run.done
+    const output = run.parts.find(part => part.type === "tool-result")!
+    expect(output.result).toEqual(expect.stringContaining("Native command (observed): printf observed"))
+    expect(output.result).toEqual(expect.stringContaining("--- Native output ---\nFinal SDK output"))
+    expect(JSON.stringify(output)).not.toContain("Hook response before other native post-hooks")
+    expect(JSON.stringify(output)).not.toContain("printf stale")
+  }, 2000)
+
+  test("child Bash observations retain child ownership and cannot label the root call", async () => {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    await q.send(bashCall("root"))
+    await q.send(bashCall("child", "native-agent"))
+    await observeBash(q, h.storage.record().nativeID, "child", "printf child-observed")
+    await q.send(bashResult("child", "native-agent"))
+    await q.send(bashResult("root"))
+    await q.send(result(input.uuid!))
+    await run.done
+    const outputs = run.parts.filter(part => part.type === "tool-result")
+    expect(outputs).toMatchObject([
+      { toolCallId: 'child:["native-agent","child"]', result: expect.stringContaining("Native command (observed): printf child-observed") },
+      { toolCallId: "root", result: expect.stringContaining("Native command not observed") },
+    ])
+  }, 2000)
+
+  test("native command observations are isolated between profile queries using the same tool ID", async () => {
+    const h = harness()
+    const left = h.run({ sessionID: "left", profile: profile("left") })
+    const lq = await h.opened.take()
+    const li = await lq.input.take()
+    const right = h.run({ sessionID: "right", profile: profile("right") })
+    const rq = await h.opened.take()
+    const ri = await rq.input.take()
+    await lq.send(bashCall("shared"))
+    await rq.send(bashCall("shared"))
+    await observeBash(lq, h.storage.record("left").nativeID, "shared", "printf left")
+    await observeBash(rq, h.storage.record("right").nativeID, "shared", "printf right")
+    await lq.send(bashResult("shared"))
+    await rq.send(bashResult("shared"))
+    await lq.send(result(li.uuid!))
+    await rq.send(result(ri.uuid!))
+    await Promise.all([left.done, right.done])
+    const lo = left.parts.find(part => part.type === "tool-result")!
+    const ro = right.parts.find(part => part.type === "tool-result")!
+    expect(lo.result).toEqual(expect.stringContaining("Native command (observed): printf left"))
+    expect(ro.result).toEqual(expect.stringContaining("Native command (observed): printf right"))
+    expect(lo.providerMetadata).toHaveProperty("left")
+    expect(ro.providerMetadata).toHaveProperty("right")
+  }, 2000)
+
+  test("late callbacks from a disposed query cannot annotate a resumed query", async () => {
+    const first = harness()
+    const run = first.run()
+    const oldQuery = await first.opened.take()
+    const initial = await oldQuery.input.take()
+    await oldQuery.send(bashCall("reused"))
+    await observeBash(oldQuery, first.storage.record().nativeID, "reused", "printf old")
+    await oldQuery.send(bashResult("reused"))
+    await oldQuery.send(result(initial.uuid!))
+    await run.done
+    await first.runtime.checkpoint("session", async () => history)
+    await first.runtime.dispose()
+    const second = harness(first.storage)
+    const resumed = second.run({ history, prompt: [user("first"), user("second")] })
+    const newQuery = await second.opened.take()
+    const next = await newQuery.input.take()
+    await newQuery.send(bashCall("reused"))
+    await observeBash(oldQuery, first.storage.record().nativeID, "reused", "printf late-old-query")
+    await newQuery.send(bashResult("reused"))
+    await newQuery.send(result(next.uuid!))
+    await resumed.done
+    const output = resumed.parts.find(part => part.type === "tool-result")!
+    expect(output.result).toEqual(expect.stringContaining("Native command not observed"))
+    expect(JSON.stringify(output)).not.toContain("late-old-query")
+    expect(newQuery.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("cancelled observations are drained without contaminating a follow-up", async () => {
+    const h = harness()
+    const first = h.run()
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    await q.send(bashCall("cancelled"))
+    first.controller.abort()
+    await q.interrupted.promise
+    await observeBash(q, h.storage.record().nativeID, "cancelled", "printf cancelled-native")
+    await q.send(bashResult("cancelled"))
+    await q.send(result(input.uuid!))
+    q.interruptGate.resolve()
+    await expect(first.done).rejects.toThrow()
+    expect(first.parts.some(part => part.type === "tool-result")).toBe(false)
+    await h.runtime.checkpoint("session", async () => history)
+    const second = h.run({ history, prompt: [user("first"), user("second")] })
+    const next = await q.input.take()
+    await q.send(bashCall("follow-up"))
+    await observeBash(q, h.storage.record().nativeID, "cancelled", "printf late-cancelled")
+    await q.send(bashResult("follow-up"))
+    await q.send(result(next.uuid!))
+    await second.done
+    const output = second.parts.find(part => part.type === "tool-result")!
+    expect(output.result).toEqual(expect.stringContaining("Native command not observed"))
+    expect(JSON.stringify(output)).not.toContain("cancelled")
+    expect(q.inputs).toHaveLength(2)
+  }, 2000)
+
   async function completedSession() {
     const h = harness()
     const run = h.run()
@@ -176,6 +309,111 @@ describe("Runtime", () => {
     ])
     expect(run.parts.filter((part) => part.type === "finish")).toEqual([expect.objectContaining({ usage: response.usage })])
     expect(h.storage.record().delivery).toEqual([response])
+  }, 2000)
+
+  test.each([429, 529])("query-wide rejection metadata does not invent request ownership for HTTP %s", async (status) => {
+    const h = harness()
+    const run = h.run({ profile: profile("actual-profile") })
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    const rateLimit = { status: "rejected", rateLimitType: "five_hour", resetsAt: 2_000_000_000 }
+    await q.send({ type: "rate_limit_event", rate_limit_info: rateLimit })
+    expect(run.parts).toEqual([])
+    await q.send({ ...result(input.uuid!), api_error_status: status, result: "Native failure" })
+    await run.done
+    expect(run.parts).toMatchObject([
+      { type: "error", error: { statusCode: status, isRetryable: false } },
+      { type: "finish", finishReason: { unified: "error" }, providerMetadata: { "actual-profile": { rateLimit } } },
+    ])
+    const error = run.parts.find((part) => part.type === "error")
+    if (error?.type !== "error") throw new Error("Missing terminal error")
+    expect((error.error as { responseHeaders?: unknown }).responseHeaders).toBeUndefined()
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("transient root diagnostics and a query-wide rejected limit cannot turn success into failure", async () => {
+    const h = harness()
+    const run = h.run()
+    const q = await h.opened.take()
+    const input = await q.input.take()
+    await q.send({ ...assistant("retry", "Transient overload"), error: "server_error" })
+    const rateLimit = { status: "rejected", rateLimitType: "seven_day", resetsAt: 2_000_000_000 }
+    await q.send({ type: "rate_limit_event", rate_limit_info: rateLimit })
+    expect(run.parts).toEqual([])
+    await q.send(result(input.uuid!))
+    await run.done
+    expect(run.parts).toMatchObject([{ type: "finish", finishReason: { unified: "stop" }, providerMetadata: { one: { rateLimit } } }])
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("query quota snapshots stay isolated across profiles and clear when a query restarts", async () => {
+    const h = harness()
+    const first = h.run()
+    const q1 = await h.opened.take()
+    const input1 = await q1.input.take()
+    const rateLimit = { status: "allowed_warning", utilization: 0.95, rateLimitType: "five_hour" }
+    await q1.send({ type: "rate_limit_event", rate_limit_info: rateLimit })
+    const second = h.run({ sessionID: "other-session", profile: profile("two") })
+    const q2 = await h.opened.take()
+    await q2.send(result((await q2.input.take()).uuid!))
+    await second.done
+    expect(second.parts.find((part) => part.type === "finish")).not.toHaveProperty("providerMetadata")
+    await q1.send(result(input1.uuid!))
+    await first.done
+    expect(first.parts.find((part) => part.type === "finish")).toMatchObject({ providerMetadata: { one: { rateLimit } } })
+    await h.runtime.checkpoint("session", async () => history)
+    q1.close()
+    await q1.didClose.promise
+    const resumed = h.run({ history, prompt: [user("first"), user("second")] })
+    const q3 = await h.opened.take()
+    await q3.send(result((await q3.input.take()).uuid!))
+    await resumed.done
+    expect(resumed.parts.find((part) => part.type === "finish")).not.toHaveProperty("providerMetadata")
+    expect(q3.inputs).toHaveLength(1)
+  }, 2000)
+
+  test("autonomous root diagnostics and query quota survive in the background notice", async () => {
+    const { h, q } = await completedSession()
+    const rateLimit = { status: "rejected", rateLimitType: "five_hour", resetsAt: 2_000_000_000 }
+    await q.send({ type: "rate_limit_event", rate_limit_info: rateLimit })
+    await q.send({ ...assistant("background-error", "Native quota detail"), error: "rate_limit", user_message_uuid: undefined })
+    await q.send({ ...result("unused"), user_message_uuid: undefined, uuid: "failed-background", api_error_status: 429, result: "" })
+    expect(h.notices.flat()).toMatchObject([{
+      uuid: "failed-background", fullClaudeStatus: { diagnostics: { code: "rate_limit", detail: "Native quota detail" }, rateLimit },
+    }])
+    expect(q.inputs).toHaveLength(1)
+  }, 2000)
+
+  test.each([false, true])("cached failure preserves metadata and submits only a mixed real user (mixed: %s)", async (mixed) => {
+    const { h, response, wake } = await completedSession()
+    const rateLimit = { status: "rejected" as const, rateLimitType: "five_hour" as const, resetsAt: 2_000_000_000 }
+    const failed: BackgroundResponse = { ...response, text: "Claude background activity failed: Quota exhausted",
+      error: { message: "Quota exhausted", statusCode: 429 }, rateLimit }
+    const failedWake = { ...wake, metadata: { fullClaudeAgentBackground: failed } }
+    const restarted = harness(h.storage)
+    const run = restarted.run({ history: [...history, failedWake, ...(mixed ? [{ id: "follow-up", type: "user", content: "Continue" }] : [])],
+      prompt: mixed ? [user("first"), user("Continue")] : [user("first")] })
+    if (mixed) {
+      const q = await restarted.opened.take()
+      const input = await q.input.take()
+      expect(input.message.content).toEqual([{ type: "text", text: "Continue" }])
+      expect(run.parts.map((part) => part.type)).toEqual(["text-start", "text-delta", "text-end"])
+      await q.send(assistant("continued", "New answer"))
+      await q.send(result(input.uuid!))
+      await run.done
+      expect(q.inputs).toHaveLength(1)
+      expect(run.parts.filter((part) => part.type === "error")).toEqual([])
+      expect(run.parts.filter((part) => part.type === "finish")).toMatchObject([{ finishReason: { unified: "stop" } }])
+    } else {
+      await run.done
+      expect(restarted.queries).toEqual([])
+      expect(run.parts.map((part) => part.type)).toEqual(["text-start", "text-delta", "text-end", "error", "finish"])
+      expect(run.parts[3]).toMatchObject({ type: "error", error: { statusCode: 429, isRetryable: false } })
+      expect(run.parts[4]).toMatchObject({ type: "finish", finishReason: { unified: "error" }, providerMetadata: { one: { rateLimit } } })
+    }
+    expect(run.parts[0]).toMatchObject({ providerMetadata: { one: { backgroundResponseID: response.id, rateLimit } } })
+    expect(run.parts[1]).toMatchObject({ type: "text-delta", delta: failed.text })
+    expect(h.storage.record().delivery).toEqual([failed])
   }, 2000)
 
   test.each(["load", "claim"])("disposal during a paused cached delivery %s rejects without emitting", async (phase) => {
@@ -495,7 +733,9 @@ describe("Runtime", () => {
     ] } })
     await q.send(result(input.uuid!))
     await disposing
-    expect(run.parts).toContainEqual(expect.objectContaining({ type: "tool-result", toolCallId: "wait", isError: true, result: "Command stopped while running" }))
+    expect(run.parts).toContainEqual(expect.objectContaining({ type: "tool-call", toolCallId: "wait", toolName: "shell", providerExecuted: true }))
+    expect(run.parts).toContainEqual(expect.objectContaining({ type: "tool-result", toolCallId: "wait", toolName: "shell", isError: true,
+      result: "Native command not observed\n\n--- Native output ---\nCommand stopped while running" }))
     await expect(run.done).rejects.toThrow("unloaded")
     expect(q.inputs).toHaveLength(1)
   }, 2000)
@@ -1142,6 +1382,57 @@ describe("Runtime", () => {
     expect(h.queries).toHaveLength(1)
     expect(q.inputs).toHaveLength(1)
     expect(q.closed).toBe(0)
+  }, 2000)
+
+  test.each([false, true])("mapped Bash history continues without replay after runtime restart=%s", async (restart) => {
+    const first = harness()
+    const run = first.run()
+    const q = await first.opened.take()
+    const initial = await q.input.take()
+    const nativeInput = { command: "printf once", description: "One native command" }
+    await q.send({ type: "assistant", parent_tool_use_id: null, message: { id: "bash-answer", content: [
+      { type: "tool_use", id: "native-bash", name: "Bash", input: nativeInput },
+    ] } })
+    await observeBash(q, first.storage.record().nativeID, "native-bash", "printf modified")
+    await q.send({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [
+      { type: "tool_result", tool_use_id: "native-bash", content: "once" },
+    ] } })
+    await q.send(result(initial.uuid!))
+    await run.done
+    const call = run.parts.find((part) => part.type === "tool-call")!
+    const output = run.parts.find((part) => part.type === "tool-result")!
+    expect(call).toMatchObject({ toolName: "shell", providerExecuted: true })
+    expect(JSON.parse(call.input).command).toBe("# Requested by Claude\nprintf once")
+    expect(output.toolName).toBe("shell")
+    expect(output.result).toContain("Native command (observed): printf modified")
+    expect(output.result).toContain("--- Native output ---\nonce")
+    const displayInput = JSON.parse(call.input)
+    const saved: HistoryEntry[] = [history[0]!, {
+      id: "bash-host-answer", type: "assistant", model: { providerID: "one" }, finish: "stop",
+      content: [{ type: "tool", id: call.toolCallId, tool: call.toolName, input: displayInput,
+        state: { status: "completed", output: output.result }, native: call.providerMetadata?.one }],
+    }]
+    await first.runtime.checkpoint("session", async () => saved)
+    const nativeID = first.storage.record().nativeID
+    const active = restart ? harness(first.storage) : first
+    if (restart) await first.runtime.dispose()
+    const prompt: LanguageModelV3Prompt = [user("first"),
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: call.toolCallId,
+        toolName: call.toolName, input: displayInput }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: call.toolCallId,
+        toolName: call.toolName, output: { type: "text", value: String(output.result) } }] },
+      user("second"),
+    ]
+    const resumed = active.run({ history: [...saved, { id: "u2", type: "user", content: "second" }], prompt })
+    const nextQuery = restart ? await active.opened.take() : q
+    const next = await nextQuery.input.take()
+    expect(next.message.content).toEqual([{ type: "text", text: "second" }])
+    if (restart) expect(nextQuery.args.options.resume).toBe(nativeID)
+    await nextQuery.send(result(next.uuid!))
+    await resumed.done
+    expect(nextQuery.inputs).toHaveLength(restart ? 1 : 2)
+    expect(resumed.parts.some((part) => part.type === "tool-call")).toBe(false)
+    expect(first.storage.record().nativeID).toBe(nativeID)
   }, 2000)
 
   test("resumes the persisted native ID in a new Runtime after checkpoint", async () => {

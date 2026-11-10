@@ -3,6 +3,7 @@ import type { Context, PanelInput } from "@opencode/plugin/tui/context"
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { NativeTasks, type NativeTask } from "./task-rpc.js"
+import { taskReads } from "./task-ui-rpc.js"
 import { outputNotice, taskIndicator, taskElapsed, taskLine, unavailableTasks, visibleTasks } from "./task-ui-state.js"
 
 const panelName = "full-claude-agent.tasks"
@@ -17,6 +18,7 @@ function taskFeed(context: Context, sessionID: () => string) {
     const location = context.data.session.get(id)?.location ?? context.location ?? context.data.location.default()
     const rpc = context.client.rpc(NativeTasks)
     const abort = new AbortController()
+    const reads = taskReads(rpc, { location, signal: abort.signal })
     let pending = false
     let again = false
     setTasks([])
@@ -26,7 +28,7 @@ function taskFeed(context: Context, sessionID: () => string) {
       if (pending) { again = true; return }
       pending = true
       try {
-        const result = await rpc.list({ sessionID: id }, { location, signal: abort.signal })
+        const result = await reads.list({ sessionID: id })
         if (!abort.signal.aborted) { setTasks(result.tasks); setError(undefined) }
       } catch {
         if (!abort.signal.aborted) {
@@ -89,7 +91,7 @@ function TaskPanel(props: { panel: PanelInput }) {
   const selectedState = createMemo(() => selected()?.state)
   const outputKey = createMemo(() => JSON.stringify([
     selected()?.id, selected()?.state, selected()?.hasOutput, props.panel.focused,
-    props.panel.sessionID, context.data.session.get(props.panel.sessionID)?.location.directory,
+    props.panel.sessionID, context.data.session.get(props.panel.sessionID)?.location ?? context.location ?? context.data.location.default(),
     outputRevision(),
   ]))
   let outputBox: ScrollBoxRenderable | undefined
@@ -112,6 +114,7 @@ function TaskPanel(props: { panel: PanelInput }) {
     const location = context.data.session.get(sessionID)?.location ?? context.location ?? context.data.location.default()
     const rpc = context.client.rpc(NativeTasks)
     const abort = new AbortController()
+    const reads = taskReads(rpc, { location, signal: abort.signal })
     setOutput("")
     setOutputNote(task ? "Loading output…" : "")
     let pending = false
@@ -119,7 +122,7 @@ function TaskPanel(props: { panel: PanelInput }) {
       if (!task || pending || abort.signal.aborted) return
       pending = true
       try {
-        const result = await rpc.output({ sessionID, id: task.id }, { location, signal: abort.signal })
+        const result = await reads.output({ sessionID, id: task.id })
         if (abort.signal.aborted) return
         setOutput(result.text)
         setOutputNote(outputNotice(result))

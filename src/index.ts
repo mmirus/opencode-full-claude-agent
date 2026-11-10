@@ -39,7 +39,7 @@ export const makePlugin = (lease?: (sessionID: string) => () => void, probe: Mod
       for (const profile of profiles) {
         const id = Provider.ID.make(profile.id)
         editor.add({
-          info: { ...Provider.Info.empty(id), name: profile.name, activation: "enabled", package: `aisdk:${PACKAGE}`, settings: { fullClaudeRuntime: lifetime } },
+          info: { ...Provider.Info.empty(id), name: profile.name, activation: "enabled", package: `aisdk:${PACKAGE}`, settings: { fullClaudeRuntime: lifetime, cache: { warming: false } } },
           models: catalog.get(profile.id).map((model) => ({
             ...Model.Info.default(id, Model.ID.make(model.id)),
             name: model.name,

@@ -1,6 +1,10 @@
-import type { JSONValue, LanguageModelV3StreamPart, LanguageModelV3Usage } from "@ai-sdk/provider"
-import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk"
+import type { LanguageModelV3StreamPart, LanguageModelV3Usage } from "@ai-sdk/provider"
+import type { SDKMessage, SDKRateLimitInfo, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk"
 import { nativeFileDiff } from "./native-diff.js"
+import { createNativeStatus } from "./native-status.js"
+import { normalizeNativeContent } from "./native-content.js"
+import { bashResultPresentation, nativeToolPresentation, type BashPresentation } from "./tool-presentation.js"
+import { bashObservation } from "./bash-provenance.js"
 
 type Part = LanguageModelV3StreamPart
 type Block = { kind: "text" | "reasoning"; id: string }
@@ -27,11 +31,12 @@ export function createStreamConverter(options = { providerID: "full-claude-agent
   const turns = new Map<string | null, Turn>()
   const streamed = new Map<string, Set<Block["kind"]>>()
   const completed = new Set<string>()
-  const tools = new Map<string, string>()
+  const tools = new Map<string, { nativeName: string; presentationName: string; presentation?: BashPresentation }>()
   const results = new Set<string>()
   let serial = 0
   let ended = false
   let closed = false
+  const status = createNativeStatus()
   const scopeKey = (parent: string | null, id: string) => JSON.stringify([parent, id])
   const toolId = (parent: string | null, id: string) => parent === null ? id : `child:${JSON.stringify([parent, id])}`
   const closeBlocks = (turn: Turn): Part[] => {
@@ -42,8 +47,9 @@ export function createStreamConverter(options = { providerID: "full-claude-agent
   }
 
   return {
-    push(message: SDKMessage): Part[] {
+    push(message: SDKMessage, latestRateLimit?: SDKRateLimitInfo): Part[] {
       if (ended || closed) return []
+      status.observe(message)
       const parts: Part[] = []
       if (message.type === "system" && message.subtype === "init") {
         for (const error of message.plugin_errors ?? []) {
@@ -96,8 +102,7 @@ export function createStreamConverter(options = { providerID: "full-claude-agent
       }
       if (message.type === "assistant") {
         if (message.error) {
-          const detail = (message.message?.content ?? []).flatMap((part) => part.type === "text" ? [part.text] : []).join("\n").trim()
-          return [{ type: "error", error: new Error(`Claude assistant error: ${message.error}${detail ? `: ${detail}` : ""}`) }]
+          return parts
         }
         const parent = message.parent_tool_use_id
         const key = scopeKey(parent, message.message.id)
@@ -106,10 +111,12 @@ export function createStreamConverter(options = { providerID: "full-claude-agent
           if (content.type === "tool_use") {
             const id = toolId(parent, content.id)
             if (tools.has(id)) continue
-            tools.set(id, content.name)
-            parts.push({ type: "tool-call", toolCallId: id, toolName: content.name,
-              input: JSON.stringify(content.input), providerExecuted: true,
-              providerMetadata: { [options.providerID]: { parentToolUseId: parent } } })
+            const input = JSON.stringify(content.input)
+            const { presentationName, presentation } = nativeToolPresentation(content.name, input)
+            tools.set(id, { nativeName: content.name, presentationName, presentation })
+            parts.push({ type: "tool-call", toolCallId: id, toolName: presentationName,
+              input: presentation ? JSON.stringify(presentation.displayInput) : input, providerExecuted: true,
+              providerMetadata: { [options.providerID]: { parentToolUseId: parent, ...(presentation ? { presentation } : {}) } } })
           }
           if (parent !== null) continue
           const kind = content.type === "text" ? "text" : content.type === "thinking" ? "reasoning" : undefined
@@ -131,32 +138,37 @@ export function createStreamConverter(options = { providerID: "full-claude-agent
           if (content.type !== "tool_result") continue
           const id = toolId(message.parent_tool_use_id, content.tool_use_id)
           if (results.has(id)) continue
-          const name = tools.get(id)
-          if (!name) {
+          const tool = tools.get(id)
+          if (!tool) {
             parts.push({ type: "error", error: new Error(`Claude tool result has no matching tool call: ${id}`) })
             continue
           }
           results.add(id)
           const diff = !content.is_error && outputs.length === 1
-            ? nativeFileDiff(name, message.tool_use_result, options.directory)
+            ? nativeFileDiff(tool.nativeName, message.tool_use_result, options.directory)
             : undefined
-          parts.push({ type: "tool-result", toolCallId: id, toolName: name,
-            result: (content.content ?? "") as NonNullable<JSONValue>, isError: content.is_error ?? false,
-            ...(diff ? { providerMetadata: { [options.providerID]: { experimental: { fileDiffs: [diff] } } } } : {}) })
+          const normalized = normalizeNativeContent(content.content)
+          const displayed = tool.presentation
+            ? bashResultPresentation(tool.presentation, normalized, bashObservation(message, content.tool_use_id))
+            : undefined
+          parts.push({ type: "tool-result", toolCallId: id, toolName: tool.presentationName,
+            result: displayed?.result ?? normalized, isError: content.is_error ?? false,
+            ...(diff || displayed ? { providerMetadata: { [options.providerID]: {
+              ...(diff ? { experimental: { fileDiffs: [diff] } } : {}),
+              ...(displayed ? { presentation: displayed.presentation } : {}),
+            } } } : {}) })
         }
       }
       if (message.type === "result") {
         ended = true
         for (const turn of turns.values()) parts.push(...closeBlocks(turn))
-        const failed = message.subtype !== "success" || message.is_error
-        if (failed) {
-          const detail = message.subtype === "success" ? message.result : message.errors.join("; ")
-          parts.push({ type: "error", error: new Error(`Claude SDK ${message.subtype}: ${detail || "query failed"}`) })
-        }
+        const outcome = status.finish(message, latestRateLimit)
+        const failed = !!outcome.error
+        if (outcome.error) parts.push({ type: "error", error: outcome.error })
         parts.push({ type: "finish", usage: resultUsage(message), finishReason: {
           unified: failed ? "error" : message.stop_reason === "max_tokens" ? "length" : "stop",
           raw: failed ? message.subtype : message.stop_reason ?? undefined,
-        } })
+        }, ...(outcome.rateLimit ? { providerMetadata: { [options.providerID]: { rateLimit: JSON.parse(JSON.stringify(outcome.rateLimit)) } } } : {}) })
       }
       return parts
     },
@@ -164,11 +176,14 @@ export function createStreamConverter(options = { providerID: "full-claude-agent
       if (closed) return []
       closed = true
       const parts: Part[] = [...turns.values()].flatMap(closeBlocks)
-      for (const [id, name] of tools) {
+      for (const [id, tool] of tools) {
         if (results.has(id)) continue
         results.add(id)
-        parts.push({ type: "tool-result", toolCallId: id, toolName: name, isError: true,
-          result: `${reason} No final native result was received for this tool. Check its outcome before retrying.` })
+        const result = `${reason} No final native result was received for this tool. Check its outcome before retrying.`
+        const displayed = tool.presentation ? bashResultPresentation(tool.presentation, result, undefined, true) : undefined
+        parts.push({ type: "tool-result", toolCallId: id, toolName: tool.presentationName, isError: true,
+          result: displayed?.result ?? result,
+          ...(displayed ? { providerMetadata: { [options.providerID]: { presentation: displayed.presentation } } } : {}) })
       }
       return parts
     },

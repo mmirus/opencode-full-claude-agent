@@ -1,10 +1,12 @@
 import type { LanguageModelV3StreamPart, LanguageModelV3Usage } from "@ai-sdk/provider"
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk"
+import type { SDKMessage, SDKRateLimitInfo, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk"
 import type { Plugin } from "@opencode/plugin"
 import { Session } from "@opencode/schema/session"
 import { SessionMessage } from "@opencode/schema/session-message"
 import { digest, type HistoryEntry } from "./prompt.js"
 import { createStreamConverter } from "./stream.js"
+import { classifyNativeResult, type NativeDiagnostics } from "./native-status.js"
+import { APICallError } from "@ai-sdk/provider"
 
 const KEY = "fullClaudeAgentBackground"
 const PREFIX = "background/"
@@ -13,6 +15,12 @@ export interface BackgroundResponse extends BackgroundOwner {
   id: string
   text: string
   usage: LanguageModelV3Usage
+  rateLimit?: SDKRateLimitInfo
+  error?: { message: string; statusCode?: number }
+}
+
+export type BackgroundResult = SDKResultMessage & {
+  fullClaudeStatus?: { diagnostics: NativeDiagnostics; rateLimit?: SDKRateLimitInfo }
 }
 
 export function backgroundResponse(message: HistoryEntry): BackgroundResponse | undefined {
@@ -26,8 +34,17 @@ export function backgroundResponse(message: HistoryEntry): BackgroundResponse | 
 
 export function backgroundParts(response: BackgroundResponse): LanguageModelV3StreamPart[] {
   const id = `background-${response.id}`
-  const providerMetadata = { [response.providerID]: { backgroundResponseID: response.id } }
+  const providerMetadata = { [response.providerID]: { backgroundResponseID: response.id,
+    ...(response.rateLimit ? { rateLimit: JSON.parse(JSON.stringify(response.rateLimit)) } : {}) } }
   return [{ type: "text-start", id, providerMetadata }, { type: "text-delta", id, delta: response.text }, { type: "text-end", id, providerMetadata }]
+}
+
+export function backgroundError(response: BackgroundResponse): Error | undefined {
+  if (!response.error) return
+  return response.error.statusCode === undefined ? new Error(response.error.message) : new APICallError({
+    message: response.error.message, statusCode: response.error.statusCode,
+    url: "claude-agent-sdk", requestBodyValues: undefined, isRetryable: false,
+  })
 }
 
 export function addUsage(left: LanguageModelV3Usage, right: LanguageModelV3Usage): LanguageModelV3Usage {
@@ -76,8 +93,10 @@ export function createBackgroundPublisher(ctx: Plugin.Context) {
         if (message.type !== "result") continue
         try {
           if (!message.uuid) throw new Error("Claude background result has no UUID; cannot deduplicate its delivery.")
-          const text = message.subtype === "success" && !message.is_error ? message.result
-            : `Claude background activity failed: ${message.subtype === "success" ? message.result : message.errors.join("; ") || message.subtype}`
+          const observed = (message as BackgroundResult).fullClaudeStatus
+          const outcome = classifyNativeResult(message, observed?.diagnostics, observed?.rateLimit)
+          const text = outcome.error ? `Claude background activity failed: ${outcome.error.message}`
+            : message.subtype === "success" ? message.result : ""
           if (!text.trim()) continue
           const id = digest([sessionID, owner.nativeID, message.uuid])
           const key = `${PREFIX}${sessionID}/${id}`
@@ -85,7 +104,11 @@ export function createBackgroundPublisher(ctx: Plugin.Context) {
           if (previous) { pending.set(key, previous); continue }
           const finish = createStreamConverter().push(message).find((part) => part.type === "finish")
           if (!finish || finish.type !== "finish") continue
-          const item: Pending = { sessionID, response: { ...owner, id, text, usage: finish.usage }, sent: false }
+          const item: Pending = { sessionID, response: { ...owner, id, text, usage: finish.usage,
+            ...(outcome.rateLimit ? { rateLimit: outcome.rateLimit } : {}),
+            ...(outcome.error ? { error: { message: outcome.error.message,
+              ...(APICallError.isInstance(outcome.error) ? { statusCode: outcome.error.statusCode } : {}) } } : {}),
+          }, sent: false }
           await ctx.storage.set(key, JSON.parse(JSON.stringify(item)))
           pending.set(key, item)
         } catch (error) { errors.push(error) }

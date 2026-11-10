@@ -2,7 +2,7 @@
 
 An OpenCode V2 provider that runs Claude Code's native tools, settings, skills, plugins, and hooks through the Claude Agent SDK. Conversations appear in OpenCode. Native questions and approval requests are connected to OpenCode's existing question and permission dialogs.
 
-This is a prototype targeting **OpenCode 2.2.5**, using **Claude Agent SDK 0.3.317**, tested with **Claude Code 2.1.316 and 2.1.317**. It registers separate providers and leaves the bundled Claude Agent available.
+This is a prototype targeting **OpenCode 2.2.7**, using **Claude Agent SDK 0.3.317**. Current native integration checks use **Claude Code 2.1.322**. It registers separate providers and leaves the bundled Claude Agent available.
 
 ## Install
 
@@ -98,13 +98,19 @@ The provider sets the SDK's PR attribution to `*Posted via OpenCode*` through pe
 
 The adapter reports native tools as provider-executed so OpenCode does not execute them again. Native `AskUserQuestion` uses OpenCode's question executor. Permission requests that Claude sends to the SDK callback use OpenCode's permission evaluator; Claude's own settings and pre-tool hook decisions still run inside Claude Code. This callback is not an OpenCode permission check on every native tool invocation.
 
+Native tool results containing only plain text blocks are displayed as readable text rather than JSON arrays. Mixed or richer content is retained, and tool failures keep their error status.
+
+Valid native Bash calls use OpenCode's stock shell card. Its header labels the command **Requested by Claude**, including while the tool is running. A read-only native post-tool observer supplies **Native command (observed)** when available; missing observations are explicit. An observation identifies native Bash input, not shell expansion, subprocess commands, or background-task completion.
+
+The card separates command observations from the final SDK tool output. When the adapter closes an unresolved call, it labels its message as adapter status rather than native output. Rich results retain their structure, with observations recorded in provider-native `presentation` metadata. That metadata also preserves the original SDK name and input. Only the host display input contains the requested-command label; Claude's command, hooks, and permissions are unchanged. Malformed Bash inputs and other tools, including Write, retain native presentation.
+
 Question and permission mapping have offline test coverage. Live terminal testing verifies that a question appears in an already-open client and that selecting an option returns the answer to Claude. Terminal permission testing verifies both rejection and one-time approval of a native write. Graphical-client question and permission dialogs remain unverified.
 
 ## Native file-diff data
 
 Successful native `Edit` and `Write` calls report their authoritative file diffs as provider-native metadata. The plugin does not execute the edit again, read the filesystem to reconstruct its result, or insert diff text into the assistant's answer.
 
-**Stock OpenCode 2.2.5 does not render this metadata as inline diff cards.** Use its session-level diff/review view to inspect changes. The experimental per-tool metadata is retained for future client integrations; running this plugin does not require a modified OpenCode build.
+**Stock OpenCode 2.2.7 does not render this metadata as inline diff cards.** Use its session-level diff/review view to inspect changes. The experimental per-tool metadata is retained for future client integrations; running this plugin does not require a modified OpenCode build.
 
 Denied, failed, staged, malformed, oversized, and missing textual patches retain ordinary tool rows. Patches are limited to 256 KiB per tool result. A new-file patch may be generated from returned contents only when the native result explicitly reports file creation. Other filesystem changes, including changes made through shell commands, remain available through OpenCode's session-level diffs. Earlier tool records without this metadata are not backfilled.
 
@@ -147,6 +153,9 @@ The viewer uses stock OpenCode's plugin UI, not its built-in Shell tab. Native t
 - A queued follow-up can start without waiting for OpenCode's execution-completion event, but only after the matching completed assistant reply is available. If that reply is missing, incomplete, or belongs to another response, the plugin rejects the follow-up without replaying the previous prompt. For older saved sessions, resume is supported when the plugin already recorded the matching completed OpenCode reply; otherwise, start a new session. Completed actions are not replayed to recover an older session.
 - Usage reports per-turn main-agent tokens. Subagent and auxiliary tokens are excluded; cumulative native usage must not be added again on each host turn. Displayed model prices are unspecified.
 - Aborting a permission request prevents the native action, but OpenCode's public `permission.assert` API cannot cancel its pending permission form.
+- Providers publish `settings.cache.warming: false` because host cache warming uses unsupported auxiliary generation. Explicit user/model overrides do not make those requests supported.
+- Claude owns internal retries. Assistant error diagnostics are retained until the terminal SDK result, so a recovered attempt does not fail the host turn. Terminal HTTP failures are errors even when the SDK result has a success-shaped envelope. OpenCode does not automatically resubmit the native prompt.
+- Response metadata includes the native query's latest observed rate-limit snapshot under the selected provider's namespace. A warning does not fail a successful response. These query-wide snapshots are not per-request rejection evidence or a live quota meter.
 
 ## Verification
 
@@ -182,15 +191,20 @@ FULL_CLAUDE_LIVE=1 FIRST_CLAUDE_CONFIG_DIR="$HOME/.claude" \
 FULL_CLAUDE_LIVE=1 bun run scripts/cancel-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/checkpoint-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/background-permission-smoke.ts
+FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/bash-presentation-smoke.ts
+FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/bash-provenance-lifecycle-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/reload-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/native-task-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/model-discovery-smoke.ts
+bun run scripts/native-status-smoke.ts
 FULL_CLAUDE_LIVE=1 bun run test:permission
 FULL_CLAUDE_LIVE=1 bun run test:diff
 bun run scripts/probe-accounts.ts "$HOME/.claude" "$HOME/.claude-secondary"
 ```
 
 The shared-server smoke requires `SECOND_CLAUDE_CONFIG_DIR`; `FIRST_CLAUDE_CONFIG_DIR` defaults to `~/.claude`. It runs concurrent named profiles, native tool/hook checks, and another turn on the same session. The cancellation smoke interrupts a native Bash call and checks that the same Claude session accepts a follow-up.
+
+The Bash presentation smoke uses three Haiku turns on its own server, configuration, database, and scratch project. It verifies hook-modified command observations, original SDK identity/input, exact SDK output and error status, zero host tool executions, restart without command replay, denied Bash without execution, and native Write presentation. Set `FULL_CLAUDE_TUI_CAPTURE=1` to inspect the actual stock terminal labels as well. The lifecycle smoke checks native background output and Stop, foreground cancellation, and continuation after restart.
 
 The permission smoke uses `full-claude-agent/haiku` on the running OpenCode server. It creates a disposable project with explicit approval rules, rejects the test session's write request through the API, and verifies that the file stays absent and the native turn completes normally. The session and diagnostic directory remain available for inspection.
 
@@ -217,7 +231,7 @@ bun run scripts/probe-accounts.ts --show-identity "$HOME/.claude" "$HOME/.claude
 
 Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other-config-dir> ...]`. Missing SDK identity fields are omitted; the probe does not infer them. Neither mode prints credentials or token values. The probe still loads user settings and can start configured integrations. Configuration paths, identity hashes, opted-in email/organization output, and retained integration-test diagnostics should be treated as private; do not commit or publish them.
 
-### Verified through 2026-11-09
+### Verified through 2026-11-10
 
 - [x] TypeScript check and offline test suite.
 - [x] Native fixture hooks, plugin discovery, transcript access, and resume through the installed Claude CLI.
@@ -236,10 +250,16 @@ Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other
 - [x] Native task visibility after foreground completion, captured-output reading, and SDK Stop with a confirmed stopped outcome and no command replay.
 - [x] Stock terminal UI loads the companion task viewer; narrow-terminal rendering has been exercised.
 - [x] Initialization-only model discovery matches Claude's IDs, names, and effort options, preserves explicit model lists, and survives an isolated server restart (OpenCode 2.2.6, Claude Code 2.1.319).
+- [x] OpenCode 2.2.7 host persistence of terminal HTTP errors, recovered diagnostics, readable native text results, and profile-scoped rate-limit metadata using controlled frames without Claude calls.
+- [x] OpenCode 2.2.7 live queued-follow-up admission and native background approval/rejection, hooks, and automatic reporting with Claude Code 2.1.322.
+- [x] OpenCode 2.2.7 with Claude Code 2.1.322 and Claude Agent SDK 0.3.317: native Bash executes once per allowed call, native hooks can modify the command, shell history preserves original SDK identity/input, host tool execution stays at zero, server restart resumes without replay, denied Bash remains an unexecuted failure, and Write retains native presentation.
+- [x] Stock OpenCode 2.2.7 TUI labels the requested command, hook-observed native input, and final native output separately. Denied commands remain errors with an explicit missing observation; Write retains native presentation.
+- [x] Native background Bash retains its observed input, task ID, captured output, and working Stop RPC. Foreground cancellation records an aborted tool rather than false completion; command completion markers remain absent.
+- [x] A native follow-up after foreground cancellation and server restart completes without replaying either command.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 
-These are recorded validation results for the versions above, not a guarantee of compatibility with every third-party plugin or workflow. The test scripts are included; private run artifacts are not.
+These are recorded validation results, not a guarantee of compatibility with every third-party plugin or workflow. Earlier checks used OpenCode 2.2.5–2.2.6 and Claude Code 2.1.316–2.1.319; current dependency requirements and host smoke commands target OpenCode 2.2.7. The test scripts are included; private run artifacts are not.
 
 ## License
 
@@ -247,7 +267,7 @@ This plugin is [MIT-licensed](LICENSE). Claude Code, the Claude Agent SDK, OpenC
 
 ## Design references
 
-- [OpenCode 2.2.5 AI SDK plugin hooks](https://github.com/anomalyco/opencode/blob/9bbb8ce18c80f099e0e448775f59d965ead40a21/packages/plugin/src/promise/aisdk.ts)
+- [OpenCode 2.2.7 AI SDK plugin hooks](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/plugin/src/promise/aisdk.ts)
 - [OpenCode server plugin API](https://opencode.ai/v2/docs/build/plugins/server)
 - [T3 Claude query options](https://github.com/pingdotgg/t3code/blob/cefb544af3c98224874419198c0359b652ca3c94/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts#L1526-L1684)
 - [T3 per-instance Claude home](https://github.com/pingdotgg/t3code/blob/cefb544af3c98224874419198c0359b652ca3c94/apps/server/src/provider/Drivers/ClaudeHome.ts)
