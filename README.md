@@ -14,22 +14,34 @@ Installation uses a local source checkout. Clone or download this repository, th
 bun install --frozen-lockfile
 bun run check
 bun test
+mkdir -p ~/.config/opencode/plugins
 ```
 
-Add the plugin to your global `~/.config/opencode/opencode.jsonc` or a project's `opencode.jsonc`. Merge the entry into any existing `plugins` array. Replace the package path below with the absolute path to your checkout:
+Use your OpenCode configuration directory if it differs from `~/.config/opencode`. The early discovery name keeps Full Claude before generated plugins such as Herdr and Worktrunk. OpenCode 2.2.7 replaces the changed plugin and the plugins after it; keeping Full Claude earlier prevents those later plugins' updates from interrupting its native work.
+
+Add the plugin to your global `~/.config/opencode/opencode.jsonc` or a project's `opencode.jsonc`. Merge the entry into any existing `plugins` array. Use the **absolute symlink path**, not its resolved checkout path, so the configured options apply to the same discovered entry:
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/absolute/path/to/opencode-full-claude-agent",
+      "package": "/home/you/.config/opencode/plugins/00-full-claude-agent",
       "options": {
         "configDir": "~/.claude"
       }
     }
   ]
 }
+```
+
+For an existing installation, replace the package target in every applicable server configuration rather than adding a second Full Claude entry, and preserve its `options`. Use the same target for an explicit Full Claude entry in `cli.json`. Apply this one-time configuration change while native work is idle; it replaces the provider activation.
+
+After saving the configuration, reload it before making the alias discoverable. This gives discovery the configured options rather than starting an unconfigured duplicate:
+
+```sh
+opencode reload
+ln -sT "$PWD" ~/.config/opencode/plugins/00-full-claude-agent
 ```
 
 Start a new session and select **Full Claude Agent** in the model picker. Existing conversations from other providers cannot be imported. The provider discovers Claude's model catalog for the selected configuration, including versioned display names, older model choices, and newly available families. Alias IDs such as `full-claude-agent/opus` remain usable; Claude resolves their versions.
@@ -43,7 +55,7 @@ Use named profiles to expose multiple selectable providers:
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/absolute/path/to/opencode-full-claude-agent",
+      "package": "/home/you/.config/opencode/plugins/00-full-claude-agent",
       "options": {
         "profiles": {
           "primary": { "configDir": "~/.claude" },
@@ -148,7 +160,7 @@ The viewer uses stock OpenCode's plugin UI, not its built-in Shell tab. Native t
 - A primary OpenCode session keeps a streaming-input Claude process alive between turns. The native `Stop` hook's continuation finishes before OpenCode marks the turn complete.
 - OpenCode plugin storage saves the Claude transcript ID and which user messages have already been submitted. Follow-ups, including after restart, resume the same Claude transcript and send only new user messages. Before sending a follow-up, the plugin checks that OpenCode has saved the matching completed assistant reply and that earlier conversation history has not changed.
 - Cancellation interrupts Claude and drains the result before another submission. A timeout or crash with an unresolved submission is an uncertain outcome: the plugin rejects automatic replay rather than repeating possible tool side effects.
-- Reloading or unloading the provider interrupts active native work. OpenCode reports the unload and retains returned tool outcomes. A tool without a final native result is marked interrupted with an unknown outcome; inspect its effects before retrying.
+- Reloading or unloading Full Claude itself interrupts active native work, as does a full Location shutdown. The installation order above prevents later plugins' file updates from unloading Full Claude; it does not make provider-code changes or full reloads seamless. OpenCode reports an unload and retains returned tool outcomes. A tool without a final native result is marked interrupted with an unknown outcome; inspect its effects before retrying.
 - Native background processes remain alive while the plugin is loaded. Their permission requests stay attached to the owning OpenCode session after the foreground turn ends. Completed native parent responses automatically appear as OpenCode assistant messages without another user prompt or another Claude request. Delivery waits if a different provider is selected. Background tool activity is not streamed while the host is idle.
 - Changing model or effort while the native process is alive requires a new session. Native background work is not terminated merely to change a model.
 - Claude owns native compaction. OpenCode compaction, forks, rewind, existing-conversation import, and auxiliary `session.generate` requests are unsupported. Titles use the initial prompt without an additional model request.
@@ -202,6 +214,7 @@ FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/reload
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/native-task-smoke.ts
 FULL_CLAUDE_LIVE=1 FULL_CLAUDE_CONFIG_DIR="$HOME/.claude" bun run scripts/model-discovery-smoke.ts
 bun run scripts/native-status-smoke.ts
+bun run scripts/reload-continuity-smoke.ts
 FULL_CLAUDE_LIVE=1 bun run test:permission
 FULL_CLAUDE_LIVE=1 bun run test:diff
 bun run scripts/probe-accounts.ts "$HOME/.claude" "$HOME/.claude-secondary"
@@ -273,6 +286,7 @@ Older saved records without native context require an explicit `--config-dir <pa
 - [x] A native follow-up after foreground cancellation and server restart completes without replaying either command.
 - [x] Native thinking summaries persist once and expand in the stock TUI. Display-only requests preserve native thinking-disabled and effort settings, including native model requirements, on Claude Code 2.1.322.
 - [x] Read-only native-session inspection resolves V2 session records and symlinked transcript storage, omits transcript bodies by default, and preserves database and transcript bytes.
+- [x] Provider-first discovery preserves an active native turn, permission approval, and foreground MCP delegation while later plugins reload, including same-byte writes and isolated Herdr/Worktrunk installer runs. The fixture uses no Claude calls and verifies that the native submission and simulated side effect occur once.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 
