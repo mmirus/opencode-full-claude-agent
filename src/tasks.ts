@@ -84,6 +84,11 @@ export class NativeTaskStore {
     }
   }
 
+  /** Whether a connected native session still reports a running task. */
+  running() {
+    return [...this.connections.keys()].some((sessionID) => [...this.records.get(sessionID)?.values() ?? []].some((record) => record.view.state === "running"))
+  }
+
   list(sessionID: string): NativeTask[] {
     const connection = this.connections.get(sessionID)
     const tasks = [...(this.records.get(sessionID)?.values() ?? [])].filter((record) => record.background).map((record) => ({

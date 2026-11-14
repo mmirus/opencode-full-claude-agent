@@ -1,11 +1,22 @@
 import type { Context as PluginContext } from "@opencode/plugin/effect/plugin"
 import { Context, Effect } from "effect"
 
+interface Shared { requests: Map<string, { context: Context.Context<never>; leased?: boolean }>; leases: Map<string, number>; owners: number }
+// Turns adopted by a later activation of this module still need the request contexts captured before the reload.
+const shared = new Map<string, Shared>()
+
 export function requestContext(ctx: PluginContext, providerIDs: readonly string[]) {
   return Effect.gen(function* () {
-    const requests = new Map<string, { context: Context.Context<never>; leased?: boolean }>()
-    const leases = new Map<string, number>()
-    yield* Effect.addFinalizer(() => Effect.sync(() => { requests.clear(); leases.clear() }))
+    const key = JSON.stringify([ctx.location.directory, ctx.location.workspaceID ?? null])
+    const slot: Shared = shared.get(key) ?? { requests: new Map(), leases: new Map(), owners: 0 }
+    shared.set(key, slot)
+    slot.owners++
+    const { requests, leases } = slot
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (--slot.owners) return
+      for (const [sessionID, request] of requests) if (!request.leased) requests.delete(sessionID)
+      if (!requests.size && !leases.size && shared.get(key) === slot) shared.delete(key)
+    }))
     for (const providerID of providerIDs) {
       yield* ctx.session.hook("context", (event) => Effect.gen(function* () {
         // External plugin setup lacks the Location service that routes live form events to clients.

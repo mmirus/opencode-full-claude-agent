@@ -18,7 +18,7 @@ Default: provider-first ordering, same-byte rewrite, real permission and MCP bri
   --changed-plugin  Change observer source rather than rewriting identical bytes.
   --installers      Rerun audited Herdr and Worktrunk installers in private HOME/XDG directories.
   --control         Complete the turn without rewriting plugins.
-  --baseline-order  Reproduce the failing provider-last ordering; expected exit 1.
+  --baseline-order  Load Full Claude after the observer, so the reload reinitializes it and it must adopt its live runtime.
   --provider-first  Explicit alias for the default ordering.`)
   process.exit(0)
 }
@@ -307,6 +307,10 @@ try {
     assert.equal(setups.length, 1, "Ordered Full Claude setup ran more than once")
     assert.deepEqual(setups[0].profiles.map((entry: any) => entry.id), ["full-claude-agent-continuity", "full-claude-agent-child"])
     assert.deepEqual(setups[0].options.profiles.continuity, profile, "Exact-target explicit options were not retained")
+  } else {
+    assert(records().filter(record => record.event === "provider-setup").length >= 2, "Provider-last reload did not reinitialize Full Claude")
+    assert.equal(records().filter(record => record.event === "runtime-dispose-start").length, 0, "Reinitialized Full Claude disposed its live runtime instead of adopting it")
+    assert.equal(records().filter(record => record.event === "provider-module-loaded").length, 1, "Full Claude module was re-imported, so adoption was not exercised")
   }
   {
     const result = records().find(record => record.event === "native-mcp-delegate-result")?.result

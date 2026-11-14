@@ -119,6 +119,11 @@ export class Runtime {
     }
   }
 
+  /** Whether a turn or background delivery is in flight, so unloading now would interrupt native work. */
+  busy() {
+    return [...this.entries.values()].some((entry) => entry.turn || entry.notices.length || entry.notifying || entry.noticeRetry)
+  }
+
   private key(id: string) { return `session/${id}` }
   private save(id: string, entry: Entry) { return this.storage.set(this.key(id), entry.record) }
 

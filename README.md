@@ -17,7 +17,7 @@ bun test
 mkdir -p ~/.config/opencode/plugins
 ```
 
-Use your OpenCode configuration directory if it differs from `~/.config/opencode`. The early discovery name keeps Full Claude before generated plugins such as Herdr and Worktrunk. OpenCode 2.2.7 replaces the changed plugin and the plugins after it; keeping Full Claude earlier prevents those later plugins' updates from interrupting its native work.
+Use your OpenCode configuration directory if it differs from `~/.config/opencode`. The early discovery name keeps Full Claude before generated plugins such as Herdr and Worktrunk. OpenCode 2.2.7 replaces the changed plugin and the plugins after it; keeping Full Claude earlier avoids reinitializing it when those later plugins update.
 
 Add the plugin to your global `~/.config/opencode/opencode.jsonc` or a project's `opencode.jsonc`. Merge the entry into any existing `plugins` array. Use the **absolute symlink path**, not its resolved checkout path, so the configured options apply to the same discovered entry:
 
@@ -160,7 +160,7 @@ The viewer uses stock OpenCode's plugin UI, not its built-in Shell tab. Native t
 - A primary OpenCode session keeps a streaming-input Claude process alive between turns. The native `Stop` hook's continuation finishes before OpenCode marks the turn complete.
 - OpenCode plugin storage saves the Claude transcript ID and which user messages have already been submitted. Follow-ups, including after restart, resume the same Claude transcript and send only new user messages. Before sending a follow-up, the plugin checks that OpenCode has saved the matching completed assistant reply and that earlier conversation history has not changed.
 - Cancellation interrupts Claude and drains the result before another submission. A timeout or crash with an unresolved submission is an uncertain outcome: the plugin rejects automatic replay rather than repeating possible tool side effects.
-- Reloading or unloading Full Claude itself interrupts active native work, as does a full Location shutdown. The installation order above prevents later plugins' file updates from unloading Full Claude; it does not make provider-code changes or full reloads seamless. OpenCode reports an unload and retains returned tool outcomes. A tool without a final native result is marked interrupted with an unknown outcome; inspect its effects before retrying.
+- When OpenCode reinitializes Full Claude without re-importing its code, such as after an earlier plugin's update, the new activation adopts the live native sessions: active turns, permission requests, and delegation continue, and native background tasks stay attached to the same Claude process. If nothing adopts busy native work within 10 seconds, it is interrupted. Changing Full Claude's own code, removing it, and a full Location shutdown interrupt active native work. OpenCode reports an unload and retains returned tool outcomes. A tool without a final native result is marked interrupted with an unknown outcome; inspect its effects before retrying.
 - Native background processes remain alive while the plugin is loaded. Their permission requests stay attached to the owning OpenCode session after the foreground turn ends. Completed native parent responses automatically appear as OpenCode assistant messages without another user prompt or another Claude request. Delivery waits if a different provider is selected. Background tool activity is not streamed while the host is idle.
 - Changing model or effort while the native process is alive requires a new session. Native background work is not terminated merely to change a model.
 - Claude owns native compaction. OpenCode compaction, forks, rewind, existing-conversation import, and auxiliary `session.generate` requests are unsupported. Titles use the initial prompt without an additional model request.
@@ -287,6 +287,8 @@ Older saved records without native context require an explicit `--config-dir <pa
 - [x] Native thinking summaries persist once and expand in the stock TUI. Display-only requests preserve native thinking-disabled and effort settings, including native model requirements, on Claude Code 2.1.322.
 - [x] Read-only native-session inspection resolves V2 session records and symlinked transcript storage, omits transcript bodies by default, and preserves database and transcript bytes.
 - [x] Provider-first discovery preserves an active native turn, permission approval, and foreground MCP delegation while later plugins reload, including same-byte writes and isolated Herdr/Worktrunk installer runs. The fixture uses no Claude calls and verifies that the native submission and simulated side effect occur once.
+- [x] With Full Claude loaded last, a reinitialized activation adopts the live runtime: the active turn, permission approval, and foreground MCP delegation complete with zero runtime disposals, including after isolated Herdr/Worktrunk installer runs.
+- [ ] A native background task's Stop control and automatic report across reinitialization. Registry retention has offline coverage only.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 
