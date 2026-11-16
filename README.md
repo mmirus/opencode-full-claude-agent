@@ -249,6 +249,17 @@ bun run scripts/probe-accounts.ts --show-identity "$HOME/.claude" "$HOME/.claude
 
 Usage: `bun run scripts/probe-accounts.ts [--show-identity] <config-dir> [<other-config-dir> ...]`. Missing SDK identity fields are omitted; the probe does not infer them. Neither mode prints credentials or token values. The probe still loads user settings and can start configured integrations. Configuration paths, identity hashes, opted-in email/organization output, and retained integration-test diagnostics should be treated as private; do not commit or publish them.
 
+### Develop with a separate live checkout
+
+When Full Claude's source files change, OpenCode re-imports the plugin, and a re-import interrupts every active Full Claude turn. A session that edits this repository's source inside the checkout OpenCode loads therefore interrupts itself. When you develop this plugin with Full Claude, point `~/.config/opencode/plugins/00-full-claude-agent` at a separate checkout that changes only when you deploy:
+
+```sh
+scripts/deploy-live.sh                 # creates or updates ~/git/opencode-full-claude-agent-live at main
+ln -sfnT ~/git/opencode-full-claude-agent-live ~/.config/opencode/plugins/00-full-claude-agent
+```
+
+Run `scripts/deploy-live.sh [<live-checkout>] [<ref>]` from a terminal while no Full Claude turn is active. It refuses to run inside a Claude Code turn unless given `--force`.
+
 ### Inspect native sessions during development
 
 ```sh
