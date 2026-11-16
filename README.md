@@ -302,7 +302,9 @@ Older saved records without native context require an explicit `--config-dir <pa
 - [x] Provider-first discovery preserves an active native turn, permission approval, and foreground MCP delegation while later plugins reload, including same-byte writes and isolated Herdr/Worktrunk installer runs. The fixture uses no Claude calls and verifies that the native submission and simulated side effect occur once.
 - [x] With Full Claude loaded last, a reinitialized activation adopts the live runtime: the active turn, permission approval, and foreground MCP delegation complete with zero runtime disposals, including after isolated Herdr/Worktrunk installer runs.
 - [x] OpenCode 2.3.0: typecheck, offline tests, the zero-Claude native-status smoke, and the provider-first reload smoke, in which MCP delegation starts a background child that receives exactly one submission.
-- [ ] OpenCode 2.3.0 live runs of the paid host smokes, and a live Full Claude delegation whose `<subagent>` reply starts a parent turn.
+- [x] OpenCode 2.3.0 live runs of the host, checkpoint, Bash presentation, and shared-server smokes with Claude Code 2.1.325.
+- [x] OpenCode 2.3.0 live delegation from Full Claude to an OpenCode model: `delegate` returns the running child's session ID, and the child's `<subagent>` reply starts a new parent turn.
+- [ ] `scripts/delegation-smoke.ts` on OpenCode 2.3.0. It still requests foreground delegation and expects the child's reply in the parent's first answer.
 - [ ] A native background task's Stop control and automatic report across reinitialization. Registry retention has offline coverage only.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
