@@ -99,7 +99,7 @@ class FakeQuery {
       try {
         const result = await client.callTool({name:"delegate",arguments:{model:"full-claude-agent-child/fake",prompt:"Return CHILD_COMPLETED without tools.",description:"Reload child"},_meta:{"claudecode/toolUseId":"reload-delegate"}},undefined,{timeout:4000});
         log("native-mcp-delegate-result",{result});
-        if(result.isError || !JSON.stringify(result).includes("CHILD_COMPLETED")) throw new Error("Native MCP delegation failed: "+JSON.stringify(result));
+        if(result.isError || result.structuredContent?.status !== "running" || typeof result.structuredContent?.sessionID !== "string") throw new Error("Native MCP delegation failed: "+JSON.stringify(result));
       } finally {await client.close();await server.instance.close();}
     }
     if (!this.child && !interrupted) {
@@ -314,7 +314,9 @@ try {
   }
   {
     const result = records().find(record => record.event === "native-mcp-delegate-result")?.result
-    assert(result && !result.isError, "Native MCP delegation did not complete successfully within 4 seconds")
+    assert(result && !result.isError, "Native MCP delegation did not start a background child within 4 seconds")
+    const deadline = Date.now() + 10_000
+    while (!records().some(record => record.event === "child-sdk-submission") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100))
     assert.equal(records().filter(record => record.event === "child-sdk-submission").length, 1, "Child did not receive exactly one SDK submission")
     const child = await client.session.get({ sessionID: result.structuredContent.sessionID }, { signal: abort.signal })
     save("child.json", child)

@@ -2,7 +2,7 @@
 
 An OpenCode V2 provider that runs Claude Code's native tools, settings, skills, plugins, and hooks through the Claude Agent SDK. Conversations appear in OpenCode. Native questions and approval requests are connected to OpenCode's existing question and permission dialogs.
 
-This is a prototype targeting **OpenCode 2.2.7**, using **Claude Agent SDK 0.3.317**. Current native integration checks use **Claude Code 2.1.322**. It registers separate providers and leaves the bundled Claude Agent available.
+This is a prototype targeting **OpenCode 2.3.0**, using **Claude Agent SDK 0.3.317**. Current native integration checks use **Claude Code 2.1.322**. It registers separate providers and leaves the bundled Claude Agent available.
 
 ## Install
 
@@ -17,7 +17,7 @@ bun test
 mkdir -p ~/.config/opencode/plugins
 ```
 
-Use your OpenCode configuration directory if it differs from `~/.config/opencode`. The early discovery name keeps Full Claude before generated plugins such as Herdr and Worktrunk. OpenCode 2.2.7 replaces the changed plugin and the plugins after it; keeping Full Claude earlier avoids reinitializing it when those later plugins update.
+Use your OpenCode configuration directory if it differs from `~/.config/opencode`. The early discovery name keeps Full Claude before generated plugins such as Herdr and Worktrunk. OpenCode 2.3.0 replaces the changed plugin and the plugins after it; keeping Full Claude earlier avoids reinitializing it when those later plugins update.
 
 Add the plugin to your global `~/.config/opencode/opencode.jsonc` or a project's `opencode.jsonc`. Merge the entry into any existing `plugins` array. Use the **absolute symlink path**, not its resolved checkout path, so the configured options apply to the same discovered entry:
 
@@ -130,18 +130,18 @@ Successful native `Edit` and `Write` calls report their authoritative file diffs
 
 Denied, failed, staged, malformed, oversized, and missing textual patches retain ordinary tool rows. Patches are limited to 256 KiB per tool result. A new-file patch may be generated from returned contents only when the native result explicitly reports file creation. Other filesystem changes, including changes made through shell commands, remain available through OpenCode's session-level diffs. Earlier tool records without this metadata are not backfilled.
 
-## Foreground cross-provider delegation
+## Cross-provider delegation
 
 Full Claude Agent exposes two in-process MCP tools:
 
 - `mcp__full_claude_opencode__list_models` uses OpenCode's model search, which defaults to the newest model in each family. It returns base model references, release timestamps, and nested variant references. Set `all: true` to include older versions; `limit` and `offset` control pagination.
-- `mcp__full_claude_opencode__delegate` runs an OpenCode subagent on the selected model and returns its session ID, model reference, and reply. The child starts in the parent OpenCode session's directory with fresh context, so the task prompt must include what the child needs.
+- `mcp__full_claude_opencode__delegate` starts an OpenCode subagent on the selected model and returns its session ID and model reference immediately. The child starts in the parent OpenCode session's directory with fresh context, so the task prompt must include what the child needs. Passing a child's `sessionID` sends that child a follow-up instead.
 
 For example, ask: “Have a Sol subagent review these changes.” Claude is instructed to use the newest matching base model unless you request another version or variant, and to report an unavailable model rather than substitute another one. Account selection follows the chosen provider/profile configuration.
 
 Outgoing delegation has been live-tested with Claude Code 2.1.317. The bridge requires the native MCP tool-use identifier so host permissions and child execution can be associated with the actual Claude call.
 
-Delegation reuses OpenCode's subagent executor, including its permission checks, depth limit, and foreground cancellation. It does not run the outer OpenCode tool-execution hook pipeline. Interrupting the parent stops the delegated child; child transcripts remain available. Background delegation and continuing an existing child through this bridge are not implemented. If a foreground delegate is manually backgrounded, the bridge interrupts it and reports that foreground execution is required.
+Delegation reuses OpenCode's subagent executor, including its permission checks and depth limit. It does not run the outer OpenCode tool-execution hook pipeline. OpenCode 2.3.0 runs every subagent in the background: each time the child goes idle, OpenCode posts a `<subagent>` message to the parent session, which starts a new Full Claude turn with the child's reply as input. The bridge interrupts a new child only when the parent turn is interrupted before `delegate` returns. Child transcripts remain available.
 
 Use native Claude `Agent` for workflows that depend on native subagent hooks. An OpenCode-managed child does not produce a native `Agent` transcript or a `SubagentStop` event in the parent Claude session. Claude's native toolset and configured MCP servers remain available alongside the delegation bridge.
 
@@ -165,7 +165,7 @@ The viewer uses stock OpenCode's plugin UI, not its built-in Shell tab. Native t
 - Changing model or effort while the native process is alive requires a new session. Native background work is not terminated merely to change a model.
 - Claude owns native compaction. OpenCode compaction, forks, rewind, existing-conversation import, and auxiliary `session.generate` requests are unsupported. Titles use the initial prompt without an additional model request.
 - OpenCode custom-agent instructions and plan-mode behavior are not propagated to Claude. The native query starts in Claude's default permission mode and uses Claude's own instructions and settings. Host integrations beyond the question, permission, and delegation bridges described above are not forwarded.
-- OpenCode sessions can delegate to a Full Claude Agent model through OpenCode's subagent tool. Full Claude Agent sessions can use the MCP delegation bridge for foreground OpenCode children, while native `Agent` remains available for Claude subagents.
+- OpenCode sessions can delegate to a Full Claude Agent model through OpenCode's subagent tool. Full Claude Agent sessions can use the MCP delegation bridge for background OpenCode children, while native `Agent` remains available for Claude subagents.
 - A queued follow-up can start without waiting for OpenCode's execution-completion event, but only after the matching completed assistant reply is available. If that reply is missing, incomplete, or belongs to another response, the plugin rejects the follow-up without replaying the previous prompt. For older saved sessions, resume is supported when the plugin already recorded the matching completed OpenCode reply; otherwise, start a new session. Completed actions are not replayed to recover an older session.
 - Usage reports per-turn main-agent tokens. Subagent and auxiliary tokens are excluded; cumulative native usage must not be added again on each host turn. Displayed model prices are unspecified.
 - Aborting a permission request prevents the native action, but OpenCode's public `permission.assert` API cannot cancel its pending permission form.
@@ -259,7 +259,7 @@ The helper reads the local OpenCode database in read-only mode and locates the n
 
 Older saved records without native context require an explicit `--config-dir <path>`. The helper does not search other accounts automatically. Keep transcript output in private diagnostic artifacts rather than commits.
 
-### Verified through 2026-11-10
+### Verified through 2026-11-16
 
 - [x] TypeScript check and offline test suite.
 - [x] Native fixture hooks, plugin discovery, transcript access, and resume through the installed Claude CLI.
@@ -288,11 +288,13 @@ Older saved records without native context require an explicit `--config-dir <pa
 - [x] Read-only native-session inspection resolves V2 session records and symlinked transcript storage, omits transcript bodies by default, and preserves database and transcript bytes.
 - [x] Provider-first discovery preserves an active native turn, permission approval, and foreground MCP delegation while later plugins reload, including same-byte writes and isolated Herdr/Worktrunk installer runs. The fixture uses no Claude calls and verifies that the native submission and simulated side effect occur once.
 - [x] With Full Claude loaded last, a reinitialized activation adopts the live runtime: the active turn, permission approval, and foreground MCP delegation complete with zero runtime disposals, including after isolated Herdr/Worktrunk installer runs.
+- [x] OpenCode 2.3.0: typecheck, offline tests, the zero-Claude native-status smoke, and the provider-first reload smoke, in which MCP delegation starts a background child that receives exactly one submission.
+- [ ] OpenCode 2.3.0 live runs of the paid host smokes, and a live Full Claude delegation whose `<subagent>` reply starts a parent turn.
 - [ ] A native background task's Stop control and automatic report across reinitialization. Registry retention has offline coverage only.
 - [ ] Graphical-client question and permission dialogs. Mapping and cancellation have offline coverage.
 - [ ] End-to-end pull-request creation and review workflows. The live tests use disposable fixtures and do not create or publish pull requests.
 
-These are recorded validation results, not a guarantee of compatibility with every third-party plugin or workflow. Earlier checks used OpenCode 2.2.5–2.2.6 and Claude Code 2.1.316–2.1.319; current dependency requirements and host smoke commands target OpenCode 2.2.7. The test scripts are included; private run artifacts are not.
+These are recorded validation results, not a guarantee of compatibility with every third-party plugin or workflow. Unlabeled items above were checked on OpenCode 2.2.7 unless they name another version. Earlier checks used OpenCode 2.2.5–2.2.6 and Claude Code 2.1.316–2.1.319; current dependency requirements and host smoke commands target OpenCode 2.3.0. The test scripts are included; private run artifacts are not.
 
 ## License
 
@@ -300,7 +302,7 @@ This plugin is [MIT-licensed](LICENSE). Claude Code, the Claude Agent SDK, OpenC
 
 ## Design references
 
-- [OpenCode 2.2.7 AI SDK plugin hooks](https://github.com/anomalyco/opencode/blob/v2.2.7/packages/plugin/src/promise/aisdk.ts)
+- [OpenCode 2.3.0 AI SDK plugin hooks](https://github.com/anomalyco/opencode/blob/v2.3.0/packages/plugin/src/promise/aisdk.ts)
 - [OpenCode server plugin API](https://opencode.ai/v2/docs/build/plugins/server)
 - [T3 Claude query options](https://github.com/pingdotgg/t3code/blob/cefb544af3c98224874419198c0359b652ca3c94/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts#L1526-L1684)
 - [T3 per-instance Claude home](https://github.com/pingdotgg/t3code/blob/cefb544af3c98224874419198c0359b652ca3c94/apps/server/src/provider/Drivers/ClaudeHome.ts)

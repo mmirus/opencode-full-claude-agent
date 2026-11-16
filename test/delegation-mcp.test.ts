@@ -4,7 +4,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createDelegationMcp, type ActiveDelegation } from "../src/delegation-mcp"
 
 const input = { model: "example/reviewer", prompt: "Review the change", description: "Review change" }
-const result = { sessionID: "ses_child", model: input.model, output: "Reviewed" }
+const result = { sessionID: "ses_child", model: input.model, status: "running" as const }
 const models = { models: [{ model: input.model, name: "Reviewer", providerID: "example", providerName: "Example", released: 1, status: "active", variants: [`${input.model}#high`] }], total: 1, truncated: false, next: null }
 const searchMeta = { "claudecode/toolUseId": "toolu_search" }
 

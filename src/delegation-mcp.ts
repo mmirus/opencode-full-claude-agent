@@ -3,7 +3,7 @@ import { z } from "zod"
 import type { createDelegation } from "./delegation.js"
 
 export const DELEGATION_SERVER = "full_claude_opencode"
-export const DELEGATION_INSTRUCTIONS = `For a user-requested subagent on another provider, use mcp__${DELEGATION_SERVER}__list_models to find the exact provider/model reference, then mcp__${DELEGATION_SERVER}__delegate. Discovery returns the newest model in each family by default, with effort variants nested under that model. Use the base model unless the user requests a variant. To find an explicitly requested older generation, search with all:true. Never guess a model ID or substitute a different model when the requested model is unavailable. Delegation runs in the foreground and returns the child session ID, selected model, and reply. Include all task context in the prompt; the child starts fresh. Use native Agent for ordinary Claude subagents, especially workflows that depend on native SubagentStop hooks. OpenCode delegation does not produce a native Agent transcript or SubagentStop event in this Claude session. Do not launch delegated work through a shell CLI or run background delegation.`
+export const DELEGATION_INSTRUCTIONS = `For a user-requested subagent on another provider, use mcp__${DELEGATION_SERVER}__list_models to find the exact provider/model reference, then mcp__${DELEGATION_SERVER}__delegate. Discovery returns the newest model in each family by default, with effort variants nested under that model. Use the base model unless the user requests a variant. To find an explicitly requested older generation, search with all:true. Never guess a model ID or substitute a different model when the requested model is unavailable. Delegation runs in the background: delegate returns the child session ID immediately. OpenCode then delivers the child's reply to this session as a <subagent> message each time the child goes idle, which starts a new turn here. Do not poll, sleep, or wait for the child; continue with non-overlapping work or end your turn. To send a follow-up or new instructions to a child, call delegate again with its sessionID. Include all task context in the prompt; the child starts fresh. Use native Agent for ordinary Claude subagents, especially workflows that depend on native SubagentStop hooks. OpenCode delegation does not produce a native Agent transcript or SubagentStop event in this Claude session. Do not launch delegated work through a shell CLI.`
 
 export interface ActiveDelegation {
   createHost: (signal: AbortSignal) => ReturnType<typeof createDelegation>
@@ -49,11 +49,12 @@ export function createDelegationMcp(active: () => ActiveDelegation | undefined) 
         limit: z.number().int().min(1).max(100).optional(),
         offset: z.number().int().min(0).optional(),
       }, (input, extra) => execute(extra, (host, toolUseID) => host.listModels(input, toolUseID)), { annotations: { readOnlyHint: true } }),
-      tool("delegate", "Run a foreground OpenCode subagent using an exact model reference from list_models. Returns its session ID and reply. Native Claude subagent hooks do not run for this host-managed child.", {
+      tool("delegate", "Start an OpenCode subagent in the background using an exact model reference from list_models, or send a follow-up to an existing child by sessionID. Returns the child session ID; its reply arrives later as a <subagent> message. Native Claude subagent hooks do not run for this host-managed child.", {
         model: z.string().min(1).describe("Exact provider/model or provider/model#variant reference"),
-        prompt: z.string().min(1).describe("Complete task and context for the new child session"),
+        prompt: z.string().min(1).describe("Complete task and context for a new child session, or the follow-up for an existing one"),
         description: z.string().min(1).describe("Short task label"),
         agent: z.string().min(1).optional().describe("OpenCode subagent type; defaults to general"),
+        sessionID: z.string().min(1).optional().describe("Session ID of an existing child to continue; omit to start a new one"),
       }, (input, extra) => execute(extra, (host, toolUseID) => {
         return host.delegate(input, toolUseID)
       }), { annotations: { readOnlyHint: false } }),

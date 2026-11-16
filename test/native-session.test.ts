@@ -11,7 +11,7 @@ afterEach(() => { for (const path of temporary.splice(0)) rmSync(path, { recursi
 
 const nativeID = "01234567-89ab-4cde-8fab-0123456789ab"
 const hostSessionID = "ses_host_with_%_wildcards"
-// OpenCode v2.2.7 packages/core/src/plugin/host.ts storage(), independent of the helper's key construction.
+// OpenCode v2.3.0 packages/core/src/plugin/host.ts storage(), independent of the helper's key construction.
 const key = `plugin:00660075006c006c002d0063006c0061007500640065002d006100670065006e0074:session/${hostSessionID}`
 
 function fixture() {

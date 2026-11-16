@@ -85,7 +85,7 @@ const env: NodeJS.ProcessEnv = { ...process.env, OPENCODE_CONFIG_DIR: config, OP
 delete env.OPENCODE_CONFIG
 delete env.OPENCODE_SERVER_PASSWORD
 const version = spawnSync("opencode", ["--version"], { env, encoding: "utf8" }).stdout.trim()
-assert.match(version, /^(?:opencode v)?2\.2\.7$/)
+assert.match(version, /^(?:opencode v)?2\.3\.0$/)
 const sdk = JSON.parse(readFileSync(join(repository, "node_modules/@anthropic-ai/claude-agent-sdk/package.json"), "utf8")).version
 save("versions.json", { opencode: version, claudeAgentSDK: sdk, claude: spawnSync("claude", ["--version"], { encoding: "utf8" }).stdout.trim() })
 const port = await new Promise<number>((resolve, reject) => {

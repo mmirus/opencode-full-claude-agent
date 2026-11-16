@@ -13,7 +13,7 @@ function fixture() {
   ]
   const modelList = mock(async () => ({ data: models }))
   const providerList = mock(async () => ({ data: [{ id: "openai-work", name: "Example Business" }, { id: "openai-personal", name: "Example Personal" }] }))
-  const execute = mock(async (_input: unknown, _context: unknown): Promise<unknown> => ({ output: { status: "completed", sessionID: "session-child", output: "Reviewed" } }))
+  const execute = mock(async (_input: unknown, _context: unknown): Promise<unknown> => ({ output: { status: "running", sessionID: "session-child", output: "The subagent is working in the background (sessionID: session-child)." } }))
   const search = mock(async (_input: unknown, _context: unknown): Promise<unknown> => ({ output: {
     providers: [{ id: "openai-work", name: "Example Business", models: [{ id: "openai-work/chat-pro", name: "Chat Pro", released: 123, status: "active", variants: ["high"], cost: { input: 123 }, options: { apiKey: "synthetic-secret" } }] }], total: 1, next: null,
   } }))
@@ -124,11 +124,11 @@ describe("delegation models", () => {
   })
 })
 
-describe("foreground delegation", () => {
+describe("background delegation", () => {
   test("uses core executor, actual assistant and actor, exact profile ref, and native call ID", async () => {
     const f = fixture()
-    expect(await f.delegate(input, "native-call")).toEqual({ sessionID: "session-child", model: input.model, output: "Reviewed" })
-    expect(f.execute).toHaveBeenCalledWith({ ...input, agent: "general", background: false }, {
+    expect(await f.delegate(input, "native-call")).toEqual({ sessionID: "session-child", model: input.model, status: "running" })
+    expect(f.execute).toHaveBeenCalledWith({ ...input, agent: "general" }, {
       sessionID: "session-parent", agent: "review", messageID: "msg_current", id: "native-call",
       signal: f.controller.signal, progress: expect.any(Function),
     })
@@ -144,7 +144,7 @@ describe("foreground delegation", () => {
     const f = fixture()
     f.get.mockResolvedValue({ agent: undefined })
     await f.delegate({ ...input, agent: "explore", model: "openai-personal/chat-pro" }, "native-call")
-    expect(f.execute.mock.calls[0]![0]).toMatchObject({ agent: "explore", model: "openai-personal/chat-pro", background: false })
+    expect(f.execute.mock.calls[0]![0]).toMatchObject({ agent: "explore", model: "openai-personal/chat-pro" })
     expect(f.execute.mock.calls[0]![1]).toMatchObject({ agent: "build" })
   })
 
@@ -169,25 +169,17 @@ describe("foreground delegation", () => {
     expect(f.execute).not.toHaveBeenCalled()
   })
 
-  test("reports manual backgrounding rather than claiming completion", async () => {
+  test("continues an existing child without interrupting it", async () => {
     const f = fixture()
-    f.execute.mockResolvedValue({ output: { status: "running", sessionID: "session-child", output: "Still working" } })
-    await expect(f.delegate(input, "native-call")).rejects.toThrow("running in the background (sessionID: session-child)")
-    expect(f.interrupt).toHaveBeenCalledWith({ sessionID: "session-child", resume: false })
-    expect(f.remove).not.toHaveBeenCalled()
+    expect(await f.delegate({ ...input, sessionID: "session-child" }, "native-call")).toEqual({ sessionID: "session-child", model: input.model, status: "running" })
+    expect(f.execute.mock.calls[0]![0]).toMatchObject({ sessionID: "session-child" })
+    expect(f.interrupt).not.toHaveBeenCalled()
   })
 
-  test("reports a failed background-child interrupt with the child ID", async () => {
-    const f = fixture()
-    f.execute.mockResolvedValue({ output: { status: "running", sessionID: "session-child", output: "Still working" } })
-    f.interrupt.mockRejectedValue(new Error("Host unavailable"))
-    await expect(f.delegate(input, "native-call")).rejects.toThrow("Failed to interrupt delegated child (sessionID: session-child); interrupt this session before retrying: Host unavailable")
-  })
-
-  test.each([undefined, {}, { content: "reply" }, { output: {} }, { output: { status: "completed", sessionID: "", output: "reply" } }, { output: { status: "completed", sessionID: "child", output: 1 } }, { output: { status: "completed", sessionID: "child", output: " " } }, { output: { status: "failed", sessionID: "child", output: "failed" } }])("rejects malformed result %j", async (result) => {
+  test.each([undefined, {}, { content: "reply" }, { output: {} }, { output: { status: "running", sessionID: "", output: "started" } }, { output: { status: "running", sessionID: " " } }, { output: { status: "completed", sessionID: "child", output: "reply" } }, { output: { status: "failed", sessionID: "child", output: "failed" } }])("rejects malformed result %j", async (result) => {
     const f = fixture()
     f.execute.mockResolvedValue(result)
-    await expect(f.delegate(input, "native-call")).rejects.toThrow("invalid completed result")
+    await expect(f.delegate(input, "native-call")).rejects.toThrow("invalid result")
   })
 
   test.each([new Error("Permission denied"), { message: "Depth exceeded" }, "Core failure", new Error(" "), undefined])("surfaces nonempty executor errors %j", async (error) => {
@@ -300,7 +292,7 @@ describe("delegation cancellation", () => {
     const f = fixture()
     f.execute.mockImplementation(async () => {
       f.controller.abort(new Error("Stopped at completion"))
-      return { output: { status: "completed", sessionID: "session-child", output: "Reply" } }
+      return { output: { status: "running", sessionID: "session-child", output: "Started" } }
     })
     await expect(f.delegate(input, "native-call")).rejects.toThrow("Stopped at completion")
     expect(f.interrupt).toHaveBeenCalledWith({ sessionID: "session-child", resume: false })

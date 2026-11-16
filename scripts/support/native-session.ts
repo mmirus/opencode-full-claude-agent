@@ -34,7 +34,7 @@ export interface NativeSessionInspection {
   }
 }
 
-// Matches OpenCode 2.2.7's plugin storage namespace in packages/core/src/plugin/host.ts.
+// Matches OpenCode 2.3.0's plugin storage namespace in packages/core/src/plugin/host.ts.
 const namespace = `plugin:${"full-claude-agent".split("").map((value) => value.charCodeAt(0).toString(16).padStart(4, "0")).join("")}:`
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const maxLineBytes = 8 * 1024 * 1024

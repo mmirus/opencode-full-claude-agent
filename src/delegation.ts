@@ -111,7 +111,7 @@ export function createDelegation(ctx: Plugin.Context, sessionID: string, signal:
       })
     },
 
-    async delegate(input: { model: string; prompt: string; description: string; agent?: string }, toolUseID: string): Promise<{ sessionID: string; model: string; output: string }> {
+    async delegate(input: { model: string; prompt: string; description: string; agent?: string; sessionID?: string }, toolUseID: string): Promise<{ sessionID: string; model: string; status: "running" }> {
       const { subagent, assistant, info } = await abortable(signal, async () => {
         if (!toolUseID.trim()) throw new Error("Delegation requires a native tool-use ID")
         let ref: Model.Ref
@@ -140,13 +140,12 @@ export function createDelegation(ctx: Plugin.Context, sessionID: string, signal:
         return { subagent, assistant, info }
       })
       let childID: string | undefined
-      let backgrounded = false
       try {
         signal.throwIfAborted()
         try {
           const result = await subagent.execute({
-            agent: input.agent ?? "general", description: input.description, prompt: input.prompt,
-            model: input.model, background: false,
+            agent: input.agent ?? "general", description: input.description, prompt: input.prompt, model: input.model,
+            ...(input.sessionID ? { sessionID: input.sessionID } : {}),
           }, {
             sessionID: session, agent: Agent.ID.make(info.agent ?? "build"),
             messageID: SessionMessage.ID.make(assistant.id), id: Tool.CallID.make(toolUseID),
@@ -157,17 +156,13 @@ export function createDelegation(ctx: Plugin.Context, sessionID: string, signal:
           const output: unknown = result?.output
           if (record(output) && typeof output.sessionID === "string" && output.sessionID.trim()) childID = output.sessionID
           signal.throwIfAborted()
-          if (record(output) && output.status === "running") {
-            backgrounded = true
-            throw new Error(`OpenCode subagent is running in the background (sessionID: ${childID ?? "unknown"}); only completed foreground delegation is supported. Retry without backgrounding the child.`)
+          if (!record(output) || output.status !== "running" || typeof output.sessionID !== "string" || !output.sessionID.trim()) {
+            throw new Error("OpenCode subagent returned an invalid result")
           }
-          if (!record(output) || output.status !== "completed" || typeof output.sessionID !== "string" || !output.sessionID.trim() || typeof output.output !== "string" || !output.output.trim()) {
-            throw new Error("OpenCode subagent returned an invalid completed result")
-          }
-          return { sessionID: output.sessionID, model: input.model, output: output.output }
+          return { sessionID: output.sessionID, model: input.model, status: "running" }
         } finally {
-          // Cancellation during prompt admission precedes the core executor's jobs.block interruption handler.
-          if ((signal.aborted || backgrounded) && childID) {
+          // A new child admitted before cancellation would otherwise run without the turn that asked for it.
+          if (signal.aborted && childID && !input.sessionID) {
             try {
               await ctx.session.interrupt({ sessionID: Session.ID.make(childID), resume: false })
             } catch (error) {

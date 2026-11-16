@@ -338,7 +338,7 @@ console.log(`Bash presentation artifacts (private): ${root}`)
 try {
   const version = spawnSync("opencode", ["--version"], { cwd, env, encoding: "utf8", timeout: 10_000 })
   assert.equal(version.status, 0)
-  assert.match(version.stdout.trim(), /^(?:opencode v)?2\.2\.7$/)
+  assert.match(version.stdout.trim(), /^(?:opencode v)?2\.3\.0$/)
   const nativeVersion = spawnSync("claude", ["--version"], { cwd, env: { ...env, CLAUDE_CONFIG_DIR: configDir }, encoding: "utf8", timeout: 10_000 })
   assert.equal(nativeVersion.status, 0)
   save("versions.json", { opencode: version.stdout.trim(), claude: nativeVersion.stdout.trim() })

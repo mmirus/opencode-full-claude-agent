@@ -979,10 +979,10 @@ describe("Runtime", () => {
   test("MCP delegation uses each new turn's host and releases its signal after settlement", async () => {
     const h = harness()
     const signals: AbortSignal[] = []
-    const host = (output: string): NonNullable<RunRequest["delegation"]> => (signal) => {
+    const host = (child: string): NonNullable<RunRequest["delegation"]> => (signal) => {
       signals.push(signal)
       return { listModels: async () => ({ models: [], total: 0, truncated: false, next: null }),
-        delegate: async () => ({ sessionID: "ses_child", model: "example/model", output }) }
+        delegate: async () => ({ sessionID: child, model: "example/model", status: "running" as const }) }
     }
     const first = h.run({ delegation: host("first") })
     const q = await h.opened.take()
@@ -1001,7 +1001,7 @@ describe("Runtime", () => {
     await client.connect(transport)
     cleanups.push(async () => { await client.close(); await server.instance.close() })
     const call = () => client.callTool({ name: "delegate", arguments: { model: "example/model", prompt: "task", description: "task" }, _meta: { "claudecode/toolUseId": "toolu_test" } })
-    expect((await call()).structuredContent).toMatchObject({ output: "first" })
+    expect((await call()).structuredContent).toMatchObject({ sessionID: "first" })
     await q.send(result(input.uuid!))
     await first.done
     expect(signals[0]!.aborted).toBe(true)
@@ -1009,7 +1009,7 @@ describe("Runtime", () => {
     await h.runtime.checkpoint("session", async () => history)
     const second = h.run({ history, prompt: [user("first"), user("second")], delegation: host("second") })
     const next = await q.input.take()
-    expect((await call()).structuredContent).toMatchObject({ output: "second" })
+    expect((await call()).structuredContent).toMatchObject({ sessionID: "second" })
     expect(signals[1]!.aborted).toBe(false)
     await q.send(result(next.uuid!))
     await second.done
@@ -1181,7 +1181,7 @@ describe("Runtime", () => {
       delegate: async () => {
         started.resolve()
         await new Promise<void>((_, reject) => signal.addEventListener("abort", () => { cancelled.resolve(); reject(signal.reason) }, { once: true }))
-        return { sessionID: "ses_child", model: "example/model", output: "not returned" }
+        return { sessionID: "ses_child", model: "example/model", status: "running" as const }
       },
     }) })
     const q = await h.opened.take()
