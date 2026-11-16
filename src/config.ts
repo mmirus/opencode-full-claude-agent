@@ -140,7 +140,9 @@ export function makeEnvironment(
   profile: Profile,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { ...baseEnv };
+  // Claude Code replays thinking from a resumed transcript. OpenCode's bundled Claude provider sets "drop" because the
+  // API rejects thinking bound to an earlier system prompt; a Full update can change this provider's prompt between turns.
+  const environment: NodeJS.ProcessEnv = { CLAUDE_CODE_POLISHED_DEWDROP: "drop", ...baseEnv };
   for (const [name, value] of Object.entries(profile.env ?? {})) {
     if (value === null) delete environment[name];
     else Object.defineProperty(environment, name, { value, enumerable: true, writable: true, configurable: true });

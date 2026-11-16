@@ -137,7 +137,14 @@ describe("makeEnvironment", () => {
 
   test("accepts single-profile env overrides and protects the mandatory config path from removal", () => {
     const profile = parseProfiles({ configDir: "personal", env: { CLAUDE_CONFIG_DIR: null, ANTHROPIC_API_KEY: null } }, directory, {})[0]!;
-    expect(makeEnvironment(profile, { CLAUDE_CONFIG_DIR: "/parent", ANTHROPIC_API_KEY: "parent-key" })).toEqual({ CLAUDE_CONFIG_DIR: profile.configDir });
+    expect(makeEnvironment(profile, { CLAUDE_CONFIG_DIR: "/parent", ANTHROPIC_API_KEY: "parent-key" })).toEqual({ CLAUDE_CONFIG_DIR: profile.configDir, CLAUDE_CODE_POLISHED_DEWDROP: "drop" });
+  });
+
+  test("drops replayed thinking by default while inherited or profile settings take precedence", () => {
+    const profile = (env?: Record<string, string | null>) => parseProfiles({ configDir: "personal", ...(env ? { env } : {}) }, directory, {})[0]!;
+    expect(makeEnvironment(profile(), {}).CLAUDE_CODE_POLISHED_DEWDROP).toBe("drop");
+    expect(makeEnvironment(profile(), { CLAUDE_CODE_POLISHED_DEWDROP: "keep" }).CLAUDE_CODE_POLISHED_DEWDROP).toBe("keep");
+    expect(Object.hasOwn(makeEnvironment(profile({ CLAUDE_CODE_POLISHED_DEWDROP: null }), {}), "CLAUDE_CODE_POLISHED_DEWDROP")).toBe(false);
   });
 
   test("removes T3 host-session variables but preserves HOME and authentication choices", () => {
@@ -159,7 +166,7 @@ describe("makeEnvironment", () => {
     expect(environment).toEqual({
       HOME: base.HOME, PATH: base.PATH, CLAUDE_CONFIG_DIR: profile.configDir,
       ANTHROPIC_API_KEY: base.ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN: base.ANTHROPIC_AUTH_TOKEN,
-      ANTHROPIC_BASE_URL: base.ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK: "1",
+      ANTHROPIC_BASE_URL: base.ANTHROPIC_BASE_URL, CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CODE_POLISHED_DEWDROP: "drop",
     });
     expect(base.CLAUDE_CONFIG_DIR).toBe("/parent/config");
     expect(base.CLAUDECODE).toBe("parent-session");
