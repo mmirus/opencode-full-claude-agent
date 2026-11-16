@@ -258,6 +258,8 @@ scripts/deploy-live.sh                 # creates or updates ~/git/opencode-full-
 ln -sfnT ~/git/opencode-full-claude-agent-live ~/.config/opencode/plugins/00-full-claude-agent
 ```
 
+After changing the symlink's target, restart the OpenCode server process (for the background service, `systemctl --user restart opencode-server.service`). `opencode reload` is not enough: the running server keeps resolving the plugin's entrypoint to the previous checkout, and OpenCode 2.3.0 silently skips a plugin whose entrypoint lies outside its directory.
+
 Run `scripts/deploy-live.sh [<live-checkout>] [<ref>]` from a terminal while no Full Claude turn is active. It refuses to run inside a Claude Code turn unless given `--force`.
 
 ### Inspect native sessions during development
