@@ -5,10 +5,13 @@ import type { SessionTitle, SessionContext } from "@opencode/plugin/promise/sess
 import { emptyUsage } from "../src/background"
 const probe = async () => ({ models: [] })
 
-test("background delivery controls are removed by message identity without hiding real user text", async () => {
+test("background delivery controls are removed by their metadata without hiding real user text", async () => {
   let context!: (event: SessionContext) => Promise<void>
   const text = "Full Claude Agent background response available."
   const registration = { dispose: async () => {} }
+  const control = (providerID: string) => ({ fullClaudeAgentBackground: {
+    id: "result", providerID, nativeID: "native", binding: "binding", text: "Completed", usage: emptyUsage(),
+  } })
   const ctx = {
     options: {}, location: { directory: process.cwd() },
     storage: { get: async () => undefined, set: async () => {}, scan: async () => ({ entries: [] }) },
@@ -16,13 +19,7 @@ test("background delivery controls are removed by message identity without hidin
     provider: { transform: async () => registration }, aisdk: { hook: async () => registration },
     session: {
       hook: async (name: string, handler: typeof context) => { if (name === "context") context = handler; return registration },
-      context: async () => [
-        { id: "msg_control", type: "synthetic", text, metadata: { fullClaudeAgentBackground: {
-          id: "result", providerID: "full-claude-agent", nativeID: "native", binding: "binding", text: "Completed", usage: emptyUsage(),
-        } } },
-        { id: "msg_user", type: "user", text },
-        { id: "msg_other", type: "synthetic", text },
-      ],
+      context: async () => { throw new Error("context hook must not read session history") },
     },
     command: { transform: async () => registration },
     event: { subscribe: async function* ({ signal }: { signal: AbortSignal }) {
@@ -32,10 +29,15 @@ test("background delivery controls are removed by message identity without hidin
   const dispose = await makePlugin(undefined, probe).setup(ctx)
   try {
     const event = { sessionID: "ses_test", options: {}, tools: {},
-      messages: ["msg_control", "msg_user", "msg_other"].map((id) => ({ id, role: "user", content: [{ type: "text", text }] })),
+      messages: [
+        { id: "msg_control", metadata: control("full-claude-agent") },
+        { id: "msg_user" },
+        { id: "msg_other_profile", metadata: control("other-profile") },
+        { id: "msg_subagent", metadata: { source: "subagent", childID: "ses_child" } },
+      ].map((message) => ({ ...message, role: "user", content: [{ type: "text", text }] })),
     } as unknown as SessionContext
     await context(event)
-    expect(event.messages.map((message) => message.id)).toEqual(["msg_user", "msg_other"])
+    expect(event.messages.map((message) => message.id)).toEqual(["msg_user", "msg_other_profile", "msg_subagent"])
   } finally { await dispose?.() }
 })
 

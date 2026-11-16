@@ -7,7 +7,7 @@ import { fromPromise } from "@opencode/plugin/promise/adapter"
 import { Plugin as EffectPlugin } from "@opencode/plugin/effect"
 import { Effect } from "effect"
 import { requestContext } from "./request-context.js"
-import { backgroundResponse, createBackgroundPublisher } from "./background.js"
+import { backgroundMetadata, createBackgroundPublisher } from "./background.js"
 import { NativeTaskStore } from "./tasks.js"
 import { NativeTasks } from "./task-rpc.js"
 import type { RpcRegistration } from "@opencode/plugin/promise/rpc"
@@ -87,10 +87,8 @@ export const makePlugin = (lease?: (sessionID: string) => () => void, probe: Mod
           event.sdk = { languageModel: (modelID: string) => new FullClaudeModel(modelID, profile, handle.value.ctx, runtime, lease) }
         }, scope)
         await ctx.session.hook("model.request", (event) => { event.headers[KIND_HEADER] = event.kind }, scope)
-        await ctx.session.hook("context", async (event) => {
-          const history = await ctx.session.context({ sessionID: event.sessionID })
-          const control = new Set(history.filter((message) => backgroundResponse(message)?.providerID === profile.id).map((message) => message.id))
-          event.messages = event.messages.filter((message) => !message.id || !control.has(message.id))
+        await ctx.session.hook("context", (event) => {
+          event.messages = event.messages.filter((message) => backgroundMetadata(message.metadata)?.providerID !== profile.id)
           event.tools = {}
           delete event.options.maxTokens
         }, scope)

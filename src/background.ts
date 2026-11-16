@@ -24,8 +24,13 @@ export type BackgroundResult = SDKResultMessage & {
 }
 
 export function backgroundResponse(message: HistoryEntry): BackgroundResponse | undefined {
-  if (message.type !== "synthetic" || !message.metadata || typeof message.metadata !== "object") return
-  const response = (message.metadata as Record<string, unknown>)[KEY] as BackgroundResponse | undefined
+  if (message.type !== "synthetic") return
+  return backgroundMetadata(message.metadata)
+}
+
+export function backgroundMetadata(metadata: unknown): BackgroundResponse | undefined {
+  if (!metadata || typeof metadata !== "object") return
+  const response = (metadata as Record<string, unknown>)[KEY] as BackgroundResponse | undefined
   if (!response || typeof response.id !== "string" || typeof response.text !== "string" ||
     typeof response.providerID !== "string" || typeof response.nativeID !== "string" || typeof response.binding !== "string" ||
     !response.usage?.inputTokens || !response.usage.outputTokens) return
